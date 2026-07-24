@@ -9,7 +9,7 @@
  * - bg_list: list all tracked terminals (running and settled).
  * - bg_kill: SIGTERM→SIGKILL the whole process tree; returns final state.
  *
- * While ≥1 process runs, a one-line widget above the editor shows
+ * While ≥1 process runs, a selectable footer status shows
  * "N background terminal(s) running • /ps to view". `/ps` opens a two-stage
  * full-screen overlay (list → read-only detail with stdout/stderr toggle).
  *
@@ -54,7 +54,13 @@ import {
 import { sanitizeText } from "./ui/output-view.ts";
 import { openTerminalPicker } from "./ui/ps.ts";
 
-const WIDGET_KEY = "background-terminals";
+const STATUS_KEY = "background-terminals";
+const STATUS_ACTIVATION_EVENT = "pi-ui-customization:activate-status";
+
+type StatusActivation = {
+	key?: unknown;
+	sessionId?: unknown;
+};
 
 export default function (pi: ExtensionAPI) {
 	let runtime: TerminalRuntime | undefined;
@@ -63,6 +69,7 @@ export default function (pi: ExtensionAPI) {
 	let sessionAbort: AbortController | undefined;
 	let ui: ExtensionUIContext | undefined;
 	let unsubStatus: (() => void) | undefined;
+	let unsubActivation: (() => void) | undefined;
 	const resultDelivery = createDeferredResultDelivery<TerminalSnapshot>();
 
 	const getRuntime = () => (runtime ??= createTerminalRuntime());
@@ -72,43 +79,38 @@ export default function (pi: ExtensionAPI) {
 		managerPromise ??= Promise.resolve(getRuntime().manager).then((manager) => {
 			manager.view.setOnSettled(onSettled);
 			unsubStatus?.();
-			unsubStatus = manager.view.subscribe(() => updateWidget(manager));
-			updateWidget(manager);
+			unsubStatus = manager.view.subscribe(() => updateStatus(manager));
+			updateStatus(manager);
 			return manager;
 		});
 		return managerPromise;
 	};
 
-	/** One-line widget directly above the editor, only while ≥1 is running.
-	 * Called on every manager notification (including per-output-chunk), so it
-	 * only touches setWidget when the running count actually changes —
-	 * replacing the widget factory hundreds of times a second would churn
-	 * component creation for no visible difference. */
-	let widgetRunning = 0;
-	const updateWidget = (manager: TerminalManager) => {
+	/** One-line footer status, only while ≥1 terminal is running. Called on
+	 * every manager notification (including per-output-chunk), so it updates
+	 * Pi's status registry only when the visible running count changes. */
+	let statusRunning = 0;
+	const updateStatus = (manager: TerminalManager) => {
 		if (!ui) return;
 		try {
 			const running = manager.view
 				.list()
 				.filter((snap) => snap.status === "running").length;
-			if (running === widgetRunning) return;
-			widgetRunning = running;
+			if (running === statusRunning) return;
+			statusRunning = running;
 			if (running === 0) {
-				ui.setWidget(WIDGET_KEY, undefined);
+				ui.setStatus(STATUS_KEY, undefined);
 				return;
 			}
-			ui.setWidget(WIDGET_KEY, (_tui, theme) => {
-				const line =
-					theme.fg("warning", "■ ") +
-					theme.fg(
-						"text",
-						`${running} background terminal${running === 1 ? "" : "s"} running`,
-					) +
-					theme.fg("dim", " • ") +
-					theme.fg("accent", "/ps") +
-					theme.fg("dim", " to view");
-				return { render: () => [line], invalidate: () => {} };
-			});
+			const line =
+				ui.theme.fg("warning", "■ ") +
+				ui.theme.fg(
+					"text",
+					`${running} background terminal${running === 1 ? "" : "s"} running`,
+				) +
+				ui.theme.fg("dim", " · ") +
+				ui.theme.fg("accent", "/ps");
+			ui.setStatus(STATUS_KEY, line);
 		} catch {
 			// UI may be unavailable (print/RPC modes or teardown).
 		}
@@ -164,11 +166,50 @@ export default function (pi: ExtensionAPI) {
 		if (!killPending && sessionContext?.isIdle()) flushResults();
 	};
 
+	const openPs = async (ctx: ExtensionContext) => {
+		const manager = await getManager();
+		if (ctx.mode !== "tui") {
+			if (ctx.hasUI) {
+				const terminals = manager.view.list();
+				ctx.ui.notify(
+					terminals.length === 0
+						? "No background terminals."
+						: terminals.map((snap) => describeTerminal(snap)).join("\n"),
+					"info",
+				);
+			}
+			return;
+		}
+		if (manager.view.size() === 0) {
+			ctx.ui.notify(
+				"No background terminals yet. The agent starts them with bg_start.",
+				"info",
+			);
+			return;
+		}
+		await openTerminalPicker(ctx, manager.view, sessionAbort?.signal);
+	};
+
 	pi.on("session_start", (_event, ctx) => {
 		sessionAbort?.abort();
 		sessionAbort = new AbortController();
 		sessionContext = ctx;
 		if (ctx.hasUI) ui = ctx.ui;
+		unsubActivation?.();
+		unsubActivation = pi.events.on(STATUS_ACTIVATION_EVENT, (data) => {
+			const activation = data as StatusActivation;
+			if (
+				activation.key !== STATUS_KEY ||
+				activation.sessionId !== ctx.sessionManager.getSessionId()
+			)
+				return;
+			void openPs(ctx).catch((error) =>
+				ctx.ui.notify(
+					error instanceof Error ? error.message : String(error),
+					"error",
+				),
+			);
+		});
 	});
 
 	// Drain deferred results when the agent settles: together with the
@@ -188,12 +229,14 @@ export default function (pi: ExtensionAPI) {
 		resultDelivery.clear();
 		unsubStatus?.();
 		unsubStatus = undefined;
+		unsubActivation?.();
+		unsubActivation = undefined;
 		try {
-			ui?.setWidget(WIDGET_KEY, undefined);
+			ui?.setStatus(STATUS_KEY, undefined);
 		} catch {
 			// UI may already be gone.
 		}
-		widgetRunning = 0;
+		statusRunning = 0;
 		ui = undefined;
 		const closing = runtime;
 		runtime = undefined;
@@ -430,28 +473,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("ps", {
 		description: "List and inspect background terminals",
-		handler: async (_args, ctx) => {
-			const manager = await getManager();
-			if (ctx.mode !== "tui") {
-				if (ctx.hasUI) {
-					const terminals = manager.view.list();
-					ctx.ui.notify(
-						terminals.length === 0
-							? "No background terminals."
-							: terminals.map((snap) => describeTerminal(snap)).join("\n"),
-						"info",
-					);
-				}
-				return;
-			}
-			if (manager.view.size() === 0) {
-				ctx.ui.notify(
-					"No background terminals yet. The agent starts them with bg_start.",
-					"info",
-				);
-				return;
-			}
-			await openTerminalPicker(ctx, manager.view, sessionAbort?.signal);
-		},
+		handler: async (_args, ctx) => openPs(ctx),
 	});
 }

@@ -8,7 +8,7 @@
  */
 
 import type {
-	ExtensionCommandContext,
+	ExtensionContext,
 	KeybindingsManager,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
@@ -61,7 +61,7 @@ function statusWord(snap: TerminalSnapshot, theme: Theme) {
 // --- Entry point ---------------------------------------------------------------
 
 export async function openTerminalPicker(
-	ctx: ExtensionCommandContext,
+	ctx: ExtensionContext,
 	view: TerminalReadModel,
 	signal?: AbortSignal,
 ) {
