@@ -1,0 +1,54 @@
+{
+	"name": "@inv1x/pi-background-terminals",
+	"version": "0.1.0",
+	"description": "Session-scoped background process management for Pi",
+	"type": "module",
+	"license": "MIT",
+	"keywords": [
+		"pi-package",
+		"pi-coding-agent",
+		"background-process",
+		"terminal"
+	],
+	"files": [
+		"src",
+		"skills",
+		"README.md",
+		"LICENSE",
+		"config.example.json"
+	],
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		],
+		"skills": [
+			"./skills/background-terminals/SKILL.md"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.81.1",
+		"@earendil-works/pi-tui": "^0.81.1",
+		"typebox": "*"
+	},
+	"scripts": {
+		"check": "biome check .",
+		"check:fix": "biome check --write .",
+		"typecheck": "tsc --noEmit",
+		"test": "node --import jiti/register --test test/*.test.ts"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.5",
+		"@earendil-works/pi-coding-agent": "0.81.1",
+		"@earendil-works/pi-tui": "0.81.1",
+		"@types/node": "^26.1.1",
+		"jiti": "^2.7.0",
+		"typebox": "^1.3.6",
+		"typescript": "^7.0.2"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}
