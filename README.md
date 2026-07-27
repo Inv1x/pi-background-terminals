@@ -8,7 +8,7 @@ Session-scoped background terminals for [Pi](https://github.com/earendil-works/p
 - No stdin surface: background commands receive EOF and cannot prompt interactively.
 - Separate bounded stdout and stderr tails, plus best-effort private session-lifetime spill logs.
 - Whole-tree termination: POSIX process groups or Windows `taskkill /T`, escalating to force termination.
-- Exactly-once deferred completion follow-ups, a selectable running-count footer status, and a read-only `/ps` picker/detail view.
+- Exactly-once deferred completion follow-ups, a selectable running-count footer status, and a read-only two-pane `/ps` inspector.
 - Cleanup of all processes and temporary logs on session shutdown or reload.
 
 ## Install locally
@@ -30,7 +30,7 @@ Ask Pi to start a long-running command, for example:
 Start npm run dev in the background and continue with the implementation.
 ```
 
-Use `/ps` to inspect live stdout/stderr or kill a terminal interactively. With `pi-ui-customization` loaded, an empty editor can use Up/Down to select the running-terminal footer row and Enter to open the same view. The model can use `bg_status`, `bg_list`, and `bg_kill` directly. Prefer Pi's regular shell tool for quick commands.
+Use `/ps` to inspect live stdout/stderr or kill a terminal interactively. The inspector uses `Up`/`Down` to select terminals, `g`/`G` to jump to the first/last terminal, `j`/`k` to scroll output, `t` to switch stdout/stderr, `x` to kill a running terminal, `r` to refresh, and `Esc`, `Ctrl+C`, or `q` to close. With `pi-ui-customization` loaded, an empty editor can use `Up`/`Down` to select the running-terminal footer row and `Enter` to open the same view; its accent color is preserved while selected. The model can use `bg_status`, `bg_list`, and `bg_kill` directly. Prefer Pi's regular shell tool for quick commands.
 
 ## Safety and limits
 

@@ -9,9 +9,8 @@
  * - bg_list: list all tracked terminals (running and settled).
  * - bg_kill: SIGTERM→SIGKILL the whole process tree; returns final state.
  *
- * While ≥1 process runs, a selectable footer status shows
- * "N background terminal(s) running • /ps to view". `/ps` opens a two-stage
- * full-screen overlay (list → read-only detail with stdout/stderr toggle).
+ * While ≥1 process runs, a selectable footer status shows the running count
+ * and `/ps`. `/ps` opens one read-only, two-pane terminal inspector.
  *
  * Architecture: a plain TypeScript session runtime owns one process manager;
  * this file is the Pi API boundary. Node stream plumbing is callback-driven.
@@ -52,10 +51,11 @@ import {
 	type TerminalRuntime,
 } from "./runtime.ts";
 import { sanitizeText } from "./ui/output-view.ts";
-import { openTerminalPicker } from "./ui/ps.ts";
+import { openTerminalInspector } from "./ui/ps.ts";
 
 const STATUS_KEY = "background-terminals";
 const STATUS_ACTIVATION_EVENT = "pi-ui-customization:activate-status";
+const STATUS_OPTIONS_EVENT = "pi-ui-customization:status-options";
 
 type StatusActivation = {
 	key?: unknown;
@@ -102,14 +102,10 @@ export default function (pi: ExtensionAPI) {
 				ui.setStatus(STATUS_KEY, undefined);
 				return;
 			}
-			const line =
-				ui.theme.fg("warning", "■ ") +
-				ui.theme.fg(
-					"text",
-					`${running} background terminal${running === 1 ? "" : "s"} running`,
-				) +
-				ui.theme.fg("dim", " · ") +
-				ui.theme.fg("accent", "/ps");
+			const line = ui.theme.fg(
+				"accent",
+				`■ ${running} background terminal${running === 1 ? "" : "s"} running · /ps`,
+			);
 			ui.setStatus(STATUS_KEY, line);
 		} catch {
 			// UI may be unavailable (print/RPC modes or teardown).
@@ -187,10 +183,14 @@ export default function (pi: ExtensionAPI) {
 			);
 			return;
 		}
-		await openTerminalPicker(ctx, manager.view, sessionAbort?.signal);
+		await openTerminalInspector(ctx, manager.view, sessionAbort?.signal);
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		pi.events.emit(STATUS_OPTIONS_EVENT, {
+			key: STATUS_KEY,
+			preserveSelectedColors: true,
+		});
 		sessionAbort?.abort();
 		sessionAbort = new AbortController();
 		sessionContext = ctx;
@@ -464,7 +464,7 @@ export default function (pi: ExtensionAPI) {
 			for (const line of previewLines)
 				text += `\n${theme.fg("toolOutput", line)}`;
 			if (body.split("\n").length > 8)
-				text += `\n${theme.fg("dim", "... (ctrl+o to expand)")}`;
+				text += `\n${theme.fg("dim", "... (Ctrl+O to expand)")}`;
 			return new Text(text, 0, 0);
 		},
 	);
