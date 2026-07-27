@@ -13,12 +13,14 @@ Session-scoped background terminals for [Pi](https://github.com/earendil-works/p
 
 ## Install locally
 
+Install the local package persistently so `/reload` can rediscover it:
+
 ```bash
 npm install
-pi -e .
+pi install /absolute/path/to/pi-background-terminals
 ```
 
-Or add this package's absolute path to Pi's package settings.
+Use `pi -e .` only for a temporary development smoke test. You can also add this package's absolute path to Pi's package settings.
 
 ## Usage
 
