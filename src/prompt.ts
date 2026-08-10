@@ -43,7 +43,7 @@ export const BG_START_PARAMETER_DESCRIPTIONS = {
 	command:
 		"Shell command line to run in the background (sh -c on POSIX, cmd.exe /d /s /c on Windows). It receives no stdin (EOF immediately); interactive commands will not work.",
 	title: "Short human-readable name shown in listings and the UI",
-	workingDir: "Working directory (default: current working directory)",
+	workingDir: "Working directory, or null to use the current working directory",
 };
 
 export const BG_STATUS_TOOL_DESCRIPTION =

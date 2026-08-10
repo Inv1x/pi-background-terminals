@@ -34,6 +34,7 @@ function assertToolsRemainExposed(session: {
 	getToolDefinition(name: string):
 		| {
 				parameters: unknown;
+				prepareArguments?: (args: unknown) => unknown;
 				constrainedSampling?: unknown;
 		  }
 		| undefined;
@@ -59,6 +60,23 @@ function assertToolsRemainExposed(session: {
 			false,
 		);
 	}
+	const startDefinition = session.getToolDefinition("bg_start");
+	assert.deepEqual(
+		startDefinition?.prepareArguments?.({ command: "sleep 1", title: "test" }),
+		{ command: "sleep 1", title: "test", working_dir: null },
+	);
+	const startSchema = startDefinition?.parameters as {
+		required?: string[];
+		properties?: {
+			working_dir?: { anyOf?: Array<{ type?: string }> };
+		};
+	};
+	assert.deepEqual(startSchema.required, ["command", "title", "working_dir"]);
+	assert.deepEqual(
+		startSchema.properties?.working_dir?.anyOf?.map((branch) => branch.type),
+		["string", "null"],
+	);
+
 	const killSchema = session.getToolDefinition("bg_kill")?.parameters as {
 		properties?: {
 			ids?: { minItems?: number; items?: { minLength?: number } };

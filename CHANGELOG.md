@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Made `bg_start.working_dir` required-but-nullable so Codex/OpenAI strict tool-schema validation accepts the tool.
+
 ### Added
 
 - Pi 0.84.1 extension-boundary, reload/shutdown cleanup, completion-delivery race, output-padding, environment privacy, and fullscreen `/ps` coverage.

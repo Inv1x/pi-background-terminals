@@ -25,7 +25,7 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
 import type { TerminalSnapshot } from "./domain.ts";
 import type { TerminalManager } from "./manager.ts";
 import {
@@ -104,6 +104,30 @@ function renderToolCall(theme: Theme, label: string, summary = "") {
 		0,
 		0,
 	);
+}
+
+const BgStartParams = Type.Object(
+	{
+		command: Type.String({
+			description: BG_START_PARAMETER_DESCRIPTIONS.command,
+			minLength: 1,
+		}),
+		title: Type.String({
+			description: BG_START_PARAMETER_DESCRIPTIONS.title,
+			minLength: 1,
+		}),
+		working_dir: Type.Union([Type.String(), Type.Null()], {
+			description: BG_START_PARAMETER_DESCRIPTIONS.workingDir,
+		}),
+	},
+	{ additionalProperties: false },
+);
+
+function prepareBgStartArguments(args: unknown): Static<typeof BgStartParams> {
+	if (!args || typeof args !== "object" || Array.isArray(args)) {
+		return args as Static<typeof BgStartParams>;
+	}
+	return { working_dir: null, ...args } as Static<typeof BgStartParams>;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -300,24 +324,8 @@ export default function (pi: ExtensionAPI) {
 		description: BG_START_TOOL_DESCRIPTION,
 		promptSnippet: BG_START_PROMPT_SNIPPET,
 		promptGuidelines: BG_START_PROMPT_GUIDELINES,
-		parameters: Type.Object(
-			{
-				command: Type.String({
-					description: BG_START_PARAMETER_DESCRIPTIONS.command,
-					minLength: 1,
-				}),
-				title: Type.String({
-					description: BG_START_PARAMETER_DESCRIPTIONS.title,
-					minLength: 1,
-				}),
-				working_dir: Type.Optional(
-					Type.String({
-						description: BG_START_PARAMETER_DESCRIPTIONS.workingDir,
-					}),
-				),
-			},
-			{ additionalProperties: false },
-		),
+		parameters: BgStartParams,
+		prepareArguments: prepareBgStartArguments,
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		renderCall(args, theme) {
 			const title = stringValue(args.title) || "terminal";
