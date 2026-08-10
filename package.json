@@ -4,6 +4,18 @@
 	"description": "Session-scoped background process management for Pi",
 	"type": "module",
 	"license": "MIT",
+	"author": "Inv1x",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Inv1x/pi-background-terminals.git"
+	},
+	"homepage": "https://github.com/Inv1x/pi-background-terminals#readme",
+	"bugs": {
+		"url": "https://github.com/Inv1x/pi-background-terminals/issues"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
 	"keywords": [
 		"pi-package",
 		"pi-coding-agent",
@@ -14,6 +26,7 @@
 		"src",
 		"skills",
 		"README.md",
+		"CHANGELOG.md",
 		"LICENSE",
 		"config.example.json"
 	],
@@ -37,15 +50,17 @@
 		"check": "biome check .",
 		"check:fix": "biome check --write .",
 		"typecheck": "tsc --noEmit",
-		"test": "node --import jiti/register --test test/*.test.ts"
+		"test": "node --import jiti/register --test test/*.test.ts",
+		"verify": "npm run check && npm run typecheck && npm test",
+		"prepack": "npm run verify"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.5",
-		"@earendil-works/pi-coding-agent": "0.81.1",
-		"@earendil-works/pi-tui": "0.81.1",
+		"@earendil-works/pi-coding-agent": "0.84.1",
+		"@earendil-works/pi-tui": "0.84.1",
 		"@types/node": "^26.1.1",
 		"jiti": "^2.7.0",
-		"typebox": "^1.3.6",
+		"typebox": "1.3.7",
 		"typescript": "^7.0.2"
 	},
 	"engines": {

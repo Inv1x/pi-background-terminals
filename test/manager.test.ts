@@ -5,8 +5,10 @@ import * as path from "node:path";
 import test from "node:test";
 import { ConcurrencyLimitError, type TerminalSnapshot } from "../src/domain.ts";
 import {
+	backgroundProcessEnvironment,
 	createTerminalManager,
 	MAX_RUNNING,
+	PI_SESSION_ENVIRONMENT_KEYS,
 	type TerminalManager,
 } from "../src/manager.ts";
 import { createDeferredResultDelivery } from "../src/result-delivery.ts";
@@ -51,6 +53,59 @@ async function poll(check: () => boolean, timeoutMs = 5_000) {
 	}
 	return true;
 }
+
+test("background children omit Pi session metadata but inherit process markers", async () => {
+	const environment: NodeJS.ProcessEnv = {
+		AI_AGENT: "pi",
+		PI_CODING_AGENT: "true",
+		PI_SESSION_ID: "session-id",
+		PI_SESSION_FILE: "/private/session.jsonl",
+		PI_PROVIDER: "provider",
+		PI_MODEL: "model",
+		PI_REASONING_LEVEL: "high",
+	};
+	const filtered = backgroundProcessEnvironment(environment);
+	assert.equal(filtered.AI_AGENT, "pi");
+	assert.equal(filtered.PI_CODING_AGENT, "true");
+	for (const key of PI_SESSION_ENVIRONMENT_KEYS)
+		assert.equal(filtered[key], undefined);
+
+	const previous = new Map<string, string | undefined>();
+	for (const [key, value] of Object.entries(environment)) {
+		previous.set(key, process.env[key]);
+		process.env[key] = value;
+	}
+	try {
+		await withManager(async (manager) => {
+			const keys = [
+				"AI_AGENT",
+				"PI_CODING_AGENT",
+				...PI_SESSION_ENVIRONMENT_KEYS,
+			];
+			const started = await manager.start({
+				command: nodeCommand(
+					`process.stdout.write(JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.map((key)=>[key,process.env[key]??null]))))`,
+				),
+				title: "environment",
+				cwd: process.cwd(),
+			});
+			const done = await settled(manager, started.id);
+			const childEnvironment = JSON.parse(done.stdout.text) as Record<
+				string,
+				string | null
+			>;
+			assert.equal(childEnvironment.AI_AGENT, "pi");
+			assert.equal(childEnvironment.PI_CODING_AGENT, "true");
+			for (const key of PI_SESSION_ENVIRONMENT_KEYS)
+				assert.equal(childEnvironment[key], null);
+		});
+	} finally {
+		for (const [key, value] of previous) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+});
 
 test("captures stdout/stderr separately, observes stdin EOF, and settles once", async () => {
 	await withManager(async (manager) => {

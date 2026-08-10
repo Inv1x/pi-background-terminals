@@ -23,6 +23,23 @@ const SETTLE_GRACE_MS = 1_000;
 const SPILL_FLUSH_TIMEOUT_MS = 1_500;
 const ERROR_TEXT_MAX_LENGTH = 4_096;
 
+/** Pi's bash-tool-only session metadata must not leak into arbitrary children. */
+export const PI_SESSION_ENVIRONMENT_KEYS = [
+	"PI_SESSION_ID",
+	"PI_SESSION_FILE",
+	"PI_PROVIDER",
+	"PI_MODEL",
+	"PI_REASONING_LEVEL",
+] as const;
+
+export function backgroundProcessEnvironment(
+	environment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+	const childEnvironment = { ...environment };
+	for (const key of PI_SESSION_ENVIRONMENT_KEYS) delete childEnvironment[key];
+	return childEnvironment;
+}
+
 interface MutableSnapshot extends TerminalSnapshot {
 	status: TerminalStatus;
 	pid?: number;
@@ -516,7 +533,7 @@ export function createTerminalManager(
 		try {
 			child = spawn(shell, args, {
 				cwd: options.cwd,
-				env: process.env,
+				env: backgroundProcessEnvironment(),
 				stdio: ["ignore", "pipe", "pipe"],
 				detached: process.platform !== "win32",
 				windowsHide: true,

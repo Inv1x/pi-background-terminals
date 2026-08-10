@@ -142,6 +142,14 @@ function panel(
 	return lines.map((line) => truncateToWidth(line, width, ""));
 }
 
+export function inspectorOverlayMaxHeight(terminalRows: number): number {
+	// Keep in sync with /ps overlayOptions (90% max height, one-row margin).
+	return Math.max(
+		1,
+		Math.min(Math.floor(terminalRows * 0.9), Math.max(1, terminalRows - 2)),
+	);
+}
+
 export interface InspectorSelection {
 	id?: string;
 	index: number;
@@ -393,7 +401,12 @@ class TerminalInspector implements Component {
 			];
 		const terminals = this.reconcile();
 		const terminalRows = this.tui.terminal?.rows ?? 30;
-		const panelHeight = Math.max(5, Math.min(20, terminalRows - 4));
+		const maxHeight = inspectorOverlayMaxHeight(terminalRows);
+		if (maxHeight < 7)
+			return [
+				truncateToWidth("Terminal is too short for /ps. Esc closes.", width),
+			];
+		const panelHeight = Math.min(20, maxHeight - 2);
 		const bodyHeight = panelHeight - 2;
 		const leftWidth = Math.max(28, Math.floor(width * 0.38));
 		const rightWidth = width - leftWidth - 1;

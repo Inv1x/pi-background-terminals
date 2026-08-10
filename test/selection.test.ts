@@ -6,10 +6,12 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type { TerminalSnapshot } from "../src/domain.ts";
 import type { TerminalReadModel } from "../src/manager.ts";
 import {
 	closeTerminalInspector,
+	inspectorOverlayMaxHeight,
 	openTerminalInspector,
 	reconcileInspectorSelection,
 } from "../src/ui/ps.ts";
@@ -99,6 +101,7 @@ interface InspectorHarness {
 function inspectorHarness(
 	terminals: TerminalSnapshot[],
 	terminalRows = 30,
+	mode: "regular" | "fullscreen" = "regular",
 ): InspectorHarness {
 	const current = terminals;
 	let subscriptions = 0;
@@ -126,6 +129,7 @@ function inspectorHarness(
 		setOnSettled: () => {},
 	};
 	const tui = {
+		mode,
 		requestRender: () => {},
 		terminal: { rows: terminalRows },
 	} as TUI;
@@ -251,6 +255,32 @@ test("inspector anchor stays stable across unchanged repeated output", async () 
 	assert.match(component.render(120).join("\n"), /Output · 1 lines below/);
 	component.handleInput?.("q");
 	await opened;
+});
+
+test("inspector fits the fullscreen overlay height and component width", async () => {
+	const terminalRows = 12;
+	const harness = inspectorHarness(
+		[snapshot("bt-1", "alpha")],
+		terminalRows,
+		"fullscreen",
+	);
+	const opened = openTerminalInspector(harness.ctx, harness.view);
+	const component = harness.component();
+	assert.ok(component);
+	const rendered = component.render(100);
+	assert.equal(rendered.length, inspectorOverlayMaxHeight(terminalRows));
+	assert.ok(rendered.every((line) => visibleWidth(line) <= 100));
+	assert.match(rendered.join("\n"), /Output/);
+	component.handleInput?.("q");
+	await opened;
+
+	const tiny = inspectorHarness([snapshot("bt-1", "alpha")], 6, "fullscreen");
+	const tinyOpened = openTerminalInspector(tiny.ctx, tiny.view);
+	const tinyComponent = tiny.component();
+	assert.ok(tinyComponent);
+	assert.ok(tinyComponent.render(100).length <= inspectorOverlayMaxHeight(6));
+	tinyComponent.handleInput?.("q");
+	await tinyOpened;
 });
 
 test("inspector reserves output space on short terminals", async () => {

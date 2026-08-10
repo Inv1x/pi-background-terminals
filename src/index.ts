@@ -23,8 +23,6 @@ import type {
 	ExtensionContext,
 	ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { TerminalSnapshot } from "./domain.ts";
 import type { TerminalManager } from "./manager.ts";
@@ -45,22 +43,32 @@ import {
 	describeTerminal,
 } from "./prompt.ts";
 import { createDeferredResultDelivery } from "./result-delivery.ts";
+import { renderTerminalResultMessage } from "./result-renderer.ts";
 import {
 	createTerminalRuntime,
 	runTool,
 	type TerminalRuntime,
 } from "./runtime.ts";
-import { sanitizeText } from "./ui/output-view.ts";
 import { openTerminalInspector } from "./ui/ps.ts";
+import {
+	UI_CUSTOMIZATION_STATUS_ACTIVATION_EVENT,
+	UI_CUSTOMIZATION_STATUS_OPTIONS_EVENT,
+	type UIStatusActivationEvent,
+	type UIStatusOptionsEvent,
+} from "./ui-customization.ts";
+
+export {
+	renderTerminalResultMessage,
+	type TerminalResultDetails,
+} from "./result-renderer.ts";
+export {
+	UI_CUSTOMIZATION_STATUS_ACTIVATION_EVENT,
+	UI_CUSTOMIZATION_STATUS_OPTIONS_EVENT,
+	type UIStatusActivationEvent,
+	type UIStatusOptionsEvent,
+} from "./ui-customization.ts";
 
 const STATUS_KEY = "background-terminals";
-const STATUS_ACTIVATION_EVENT = "pi-ui-customization:activate-status";
-const STATUS_OPTIONS_EVENT = "pi-ui-customization:status-options";
-
-type StatusActivation = {
-	key?: unknown;
-	sessionId?: unknown;
-};
 
 export default function (pi: ExtensionAPI) {
 	let runtime: TerminalRuntime | undefined;
@@ -187,29 +195,33 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (_event, ctx) => {
-		pi.events.emit(STATUS_OPTIONS_EVENT, {
+		const statusOptions: UIStatusOptionsEvent = {
 			key: STATUS_KEY,
 			preserveSelectedColors: true,
-		});
+		};
+		pi.events.emit(UI_CUSTOMIZATION_STATUS_OPTIONS_EVENT, statusOptions);
 		sessionAbort?.abort();
 		sessionAbort = new AbortController();
 		sessionContext = ctx;
 		if (ctx.hasUI) ui = ctx.ui;
 		unsubActivation?.();
-		unsubActivation = pi.events.on(STATUS_ACTIVATION_EVENT, (data) => {
-			const activation = data as StatusActivation;
-			if (
-				activation.key !== STATUS_KEY ||
-				activation.sessionId !== ctx.sessionManager.getSessionId()
-			)
-				return;
-			void openPs(ctx).catch((error) =>
-				ctx.ui.notify(
-					error instanceof Error ? error.message : String(error),
-					"error",
-				),
-			);
-		});
+		unsubActivation = pi.events.on(
+			UI_CUSTOMIZATION_STATUS_ACTIVATION_EVENT,
+			(data) => {
+				const activation = data as Partial<UIStatusActivationEvent>;
+				if (
+					activation.key !== STATUS_KEY ||
+					activation.sessionId !== ctx.sessionManager.getSessionId()
+				)
+					return;
+				void openPs(ctx).catch((error) =>
+					ctx.ui.notify(
+						error instanceof Error ? error.message : String(error),
+						"error",
+					),
+				);
+			},
+		);
 	});
 
 	// Drain deferred results when the agent settles: together with the
@@ -252,19 +264,25 @@ export default function (pi: ExtensionAPI) {
 		description: BG_START_TOOL_DESCRIPTION,
 		promptSnippet: BG_START_PROMPT_SNIPPET,
 		promptGuidelines: BG_START_PROMPT_GUIDELINES,
-		parameters: Type.Object({
-			command: Type.String({
-				description: BG_START_PARAMETER_DESCRIPTIONS.command,
-			}),
-			title: Type.String({
-				description: BG_START_PARAMETER_DESCRIPTIONS.title,
-			}),
-			working_dir: Type.Optional(
-				Type.String({
-					description: BG_START_PARAMETER_DESCRIPTIONS.workingDir,
+		parameters: Type.Object(
+			{
+				command: Type.String({
+					description: BG_START_PARAMETER_DESCRIPTIONS.command,
+					minLength: 1,
 				}),
-			),
-		}),
+				title: Type.String({
+					description: BG_START_PARAMETER_DESCRIPTIONS.title,
+					minLength: 1,
+				}),
+				working_dir: Type.Optional(
+					Type.String({
+						description: BG_START_PARAMETER_DESCRIPTIONS.workingDir,
+					}),
+				),
+			},
+			{ additionalProperties: false },
+		),
+		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const manager = await getManager();
 
@@ -296,9 +314,16 @@ export default function (pi: ExtensionAPI) {
 		name: "bg_status",
 		label: "Check Background Terminal",
 		description: BG_STATUS_TOOL_DESCRIPTION,
-		parameters: Type.Object({
-			id: Type.String({ description: BG_STATUS_PARAMETER_DESCRIPTIONS.id }),
-		}),
+		parameters: Type.Object(
+			{
+				id: Type.String({
+					description: BG_STATUS_PARAMETER_DESCRIPTIONS.id,
+					minLength: 1,
+				}),
+			},
+			{ additionalProperties: false },
+		),
+		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(_toolCallId, params) {
 			const manager = await getManager();
 			const snap = manager.view.get(params.id);
@@ -330,7 +355,8 @@ export default function (pi: ExtensionAPI) {
 		name: "bg_list",
 		label: "List Background Terminals",
 		description: BG_LIST_TOOL_DESCRIPTION,
-		parameters: Type.Object({}),
+		parameters: Type.Object({}, { additionalProperties: false }),
+		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute() {
 			const manager = await getManager();
 			const terminals = manager.view.list();
@@ -356,11 +382,16 @@ export default function (pi: ExtensionAPI) {
 		name: "bg_kill",
 		label: "Kill Background Terminals",
 		description: BG_KILL_TOOL_DESCRIPTION,
-		parameters: Type.Object({
-			ids: Type.Array(Type.String(), {
-				description: BG_KILL_PARAMETER_DESCRIPTIONS.ids,
-			}),
-		}),
+		parameters: Type.Object(
+			{
+				ids: Type.Array(Type.String({ minLength: 1 }), {
+					description: BG_KILL_PARAMETER_DESCRIPTIONS.ids,
+					minItems: 1,
+				}),
+			},
+			{ additionalProperties: false },
+		),
+		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(_toolCallId, params, signal) {
 			const manager = await getManager();
 			const ids = [...new Set(params.ids)];
@@ -414,59 +445,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerMessageRenderer(
 		"background-terminal-result",
-		(message, { expanded }, theme) => {
-			const details = (message.details ?? {}) as {
-				id?: string;
-				title?: string;
-				status?: string;
-				exitCode?: number;
-				signal?: string;
-			};
-			const failed = details.status === "failed";
-			const killed = details.status === "killed";
-			const icon = failed
-				? theme.fg("error", "x")
-				: killed
-					? theme.fg("muted", "■")
-					: theme.fg("success", "■");
-			const how = killed
-				? "killed"
-				: (details.signal ?? `exit ${details.exitCode ?? "?"}`);
-			const header =
-				`${icon} ` +
-				theme.fg("accent", theme.bold(`terminal ${details.id ?? "?"}`)) +
-				theme.fg("muted", ` · ${details.title ?? ""} · ${how}`);
-
-			const content =
-				typeof message.content === "string" ? message.content : "";
-			// Remove only the summary line; the Error line (when present) is part
-			// of the actual result and must remain visible. The body carries raw
-			// process output — sanitize ANSI/control chars or the transcript smears.
-			const body = sanitizeText(content.split("\n").slice(1).join("\n").trim());
-
-			if (expanded) {
-				const md = new Markdown(`${body}`, 0, 0, getMarkdownTheme());
-				const container = new Text(header, 0, 0);
-				return {
-					render: (width: number) => [
-						...container.render(width),
-						...md.render(width),
-					],
-					invalidate: () => {
-						container.invalidate();
-						md.invalidate();
-					},
-				};
-			}
-
-			const previewLines = body.split("\n").slice(0, 8);
-			let text = header;
-			for (const line of previewLines)
-				text += `\n${theme.fg("toolOutput", line)}`;
-			if (body.split("\n").length > 8)
-				text += `\n${theme.fg("dim", "... (Ctrl+O to expand)")}`;
-			return new Text(text, 0, 0);
-		},
+		renderTerminalResultMessage,
 	);
 
 	// --- Command ------------------------------------------------------------
