@@ -3,6 +3,7 @@ import test from "node:test";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	Theme,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import backgroundTerminals from "../src/index.ts";
@@ -28,6 +29,40 @@ type ExtensionHandler = (
 	event: unknown,
 	ctx: ExtensionContext,
 ) => unknown | Promise<unknown>;
+
+const plainTheme = {
+	fg: (_color: string, text: string) => text,
+	bg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+} as Theme;
+
+function renderedCall(tool: ToolDefinition, args: Record<string, unknown>) {
+	assert.ok(tool.renderCall);
+	return tool
+		.renderCall(args, plainTheme, {} as never)
+		.render(160)
+		.join("\n");
+}
+
+function renderedResult(
+	tool: ToolDefinition,
+	result: Awaited<ReturnType<ToolDefinition["execute"]>>,
+) {
+	assert.ok(tool.renderResult);
+	return tool
+		.renderResult(
+			result,
+			{ expanded: true, isPartial: false },
+			plainTheme,
+			{} as never,
+		)
+		.render(160)
+		.join("\n");
+}
+
+function assertTerminalLiteral(text: string) {
+	assert.doesNotMatch(text, /[\u001b\u009b\u0000\u202A-\u202E\u2066-\u2069]/);
+}
 
 function createBoundaryHarness() {
 	const handlers = new Map<string, ExtensionHandler[]>();
@@ -90,6 +125,99 @@ function createBoundaryHarness() {
 		},
 	};
 }
+
+test("all extension tool call/result render paths reject title and process-output injection", async () => {
+	const harness = createBoundaryHarness();
+	await harness.emit("session_start");
+	const start = harness.tools.get("bg_start");
+	const status = harness.tools.get("bg_status");
+	const list = harness.tools.get("bg_list");
+	const kill = harness.tools.get("bg_kill");
+	assert.ok(start && status && list && kill);
+	const osc52 = "\u001b]52;c;c2VjcmV0\u0007";
+	const title = `safe-title${osc52}\u001b[2J\u202E\u001b]52;c;unterminated`;
+	const output = `visible${osc52}\u001b[31m-red\u001b[0m\u2066\u0000\nlast\u001b[12345`;
+
+	try {
+		for (const call of [
+			renderedCall(start, {
+				command: `echo${osc52}`,
+				title,
+				working_dir: `.${osc52}`,
+			}),
+			renderedCall(status, { id: `bt-1${osc52}` }),
+			renderedCall(list, {}),
+			renderedCall(kill, { ids: [`bt-1${osc52}`] }),
+		]) {
+			assertTerminalLiteral(call);
+			assert.doesNotMatch(call, /c2VjcmV0|unterminated/);
+		}
+
+		const started = await start.execute(
+			"unsafe-start",
+			{
+				command: nodeCommand(
+					`process.stdout.write(${JSON.stringify(output)});setInterval(()=>{},1000)`,
+				),
+				title,
+			},
+			undefined,
+			undefined,
+			harness.ctx,
+		);
+		assertTerminalLiteral(renderedResult(start, started));
+		assertTerminalLiteral(JSON.stringify(started.details));
+		assert.doesNotMatch(JSON.stringify(started.details), /c2VjcmV0/);
+		const id = (started.details as { id: string }).id;
+
+		let statusResult:
+			| Awaited<ReturnType<ToolDefinition["execute"]>>
+			| undefined;
+		assert.ok(
+			await poll(async () => {
+				statusResult = await status.execute(
+					"unsafe-status",
+					{ id },
+					undefined,
+					undefined,
+					harness.ctx,
+				);
+				return (
+					(statusResult.content[0] as { text?: string }).text?.includes(
+						"visible",
+					) === true
+				);
+			}),
+		);
+		assert.ok(statusResult);
+		const statusText = renderedResult(status, statusResult);
+		assertTerminalLiteral(statusText);
+		assert.match(statusText, /visible-red/);
+		assert.doesNotMatch(statusText, /c2VjcmV0|unterminated/);
+
+		const listed = await list.execute(
+			"unsafe-list",
+			{},
+			undefined,
+			undefined,
+			harness.ctx,
+		);
+		assertTerminalLiteral(renderedResult(list, listed));
+		assertTerminalLiteral(JSON.stringify(listed.details));
+
+		const killed = await kill.execute(
+			"unsafe-kill",
+			{ ids: [id] },
+			undefined,
+			undefined,
+			harness.ctx,
+		);
+		assertTerminalLiteral(renderedResult(kill, killed));
+		assertTerminalLiteral(JSON.stringify(killed.details));
+	} finally {
+		await harness.emit("session_shutdown");
+	}
+});
 
 test("extension boundary delivers completion exactly once across idle/settled races", async () => {
 	const harness = createBoundaryHarness();

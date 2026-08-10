@@ -22,7 +22,9 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionUIContext,
+	Theme,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { TerminalSnapshot } from "./domain.ts";
 import type { TerminalManager } from "./manager.ts";
@@ -49,6 +51,7 @@ import {
 	runTool,
 	type TerminalRuntime,
 } from "./runtime.ts";
+import { sanitizeTerminalLine, sanitizeTerminalText } from "./terminal-text.ts";
 import { openTerminalInspector } from "./ui/ps.ts";
 import {
 	UI_CUSTOMIZATION_STATUS_ACTIVATION_EVENT,
@@ -69,6 +72,39 @@ export {
 } from "./ui-customization.ts";
 
 const STATUS_KEY = "background-terminals";
+
+function stringValue(value: unknown): string {
+	return typeof value === "string" ? value : "";
+}
+
+/** Literal tool-result renderer shared by all four tools. Tool result builders
+ * already sanitize at the API boundary; the idempotent pass here protects
+ * extension calls that provide synthetic or stale result objects. */
+function renderLiteralToolResult(
+	result: { content: ReadonlyArray<{ type: string; text?: string }> },
+	_options: unknown,
+	theme: Theme,
+) {
+	const text = result.content
+		.filter(
+			(item): item is { type: string; text: string } =>
+				item.type === "text" && typeof item.text === "string",
+		)
+		.map((item) => item.text)
+		.join("\n");
+	return new Text(theme.fg("toolOutput", sanitizeTerminalText(text)), 0, 0);
+}
+
+function renderToolCall(theme: Theme, label: string, summary = "") {
+	const title = theme.fg("toolTitle", theme.bold(label));
+	return new Text(
+		summary
+			? `${title} ${theme.fg("accent", sanitizeTerminalLine(summary))}`
+			: title,
+		0,
+		0,
+	);
+}
 
 export default function (pi: ExtensionAPI) {
 	let runtime: TerminalRuntime | undefined;
@@ -128,11 +164,11 @@ export default function (pi: ExtensionAPI) {
 					content: buildTerminalResultMessage(snap),
 					display: true,
 					details: {
-						id: snap.id,
-						title: snap.title,
+						id: sanitizeTerminalLine(snap.id),
+						title: sanitizeTerminalLine(snap.title),
 						status: snap.status,
 						exitCode: snap.exitCode,
-						signal: snap.signal,
+						signal: snap.signal ? sanitizeTerminalLine(snap.signal) : undefined,
 					},
 				},
 				// followUp: queued until the agent has no more tool calls — never
@@ -283,6 +319,14 @@ export default function (pi: ExtensionAPI) {
 			{ additionalProperties: false },
 		),
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
+		renderCall(args, theme) {
+			const title = stringValue(args.title) || "terminal";
+			const command = stringValue(args.command);
+			const cwd = stringValue(args.working_dir);
+			const summary = `"${title}"${command ? ` · ${command}` : ""}${cwd ? ` · ${cwd}` : ""}`;
+			return renderToolCall(theme, "bg_start", summary);
+		},
+		renderResult: renderLiteralToolResult,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const manager = await getManager();
 
@@ -290,14 +334,20 @@ export default function (pi: ExtensionAPI) {
 			if (!command) throw new Error("command must not be empty.");
 
 			const cwd = path.resolve(ctx.cwd, params.working_dir ?? ".");
-			if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
-				throw new Error(`working_dir is not a directory: ${cwd}`);
+			let isDirectory = false;
+			try {
+				isDirectory = fs.existsSync(cwd) && fs.statSync(cwd).isDirectory();
+			} catch {
+				// Report only the literal path below; native fs errors may echo it raw.
+			}
+			if (!isDirectory) {
+				throw new Error(
+					`working_dir is not a directory: ${sanitizeTerminalLine(cwd)}`,
+				);
 			}
 
-			// Collapse whitespace (a newline inside a one-line UI row desyncs the
-			// TUI renderer) before bounding the length.
 			const title =
-				params.title.replace(/\s+/g, " ").trim().slice(0, 80) || "terminal";
+				sanitizeTerminalLine(params.title).slice(0, 80) || "terminal";
 			const snap = await runTool(
 				getRuntime(),
 				manager.start({ command, title, cwd }),
@@ -305,7 +355,12 @@ export default function (pi: ExtensionAPI) {
 
 			return {
 				content: [{ type: "text", text: buildStartResult(snap) }],
-				details: { id: snap.id, title: snap.title, cwd, pid: snap.pid },
+				details: {
+					id: sanitizeTerminalLine(snap.id),
+					title: sanitizeTerminalLine(snap.title),
+					cwd: sanitizeTerminalLine(cwd),
+					pid: snap.pid,
+				},
 			};
 		},
 	});
@@ -324,13 +379,16 @@ export default function (pi: ExtensionAPI) {
 			{ additionalProperties: false },
 		),
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
+		renderCall: (args, theme) =>
+			renderToolCall(theme, "bg_status", stringValue(args.id)),
+		renderResult: renderLiteralToolResult,
 		async execute(_toolCallId, params) {
 			const manager = await getManager();
 			const snap = manager.view.get(params.id);
 			if (!snap) {
 				const known = manager.view.list().map((s) => s.id);
 				throw new Error(
-					`Unknown terminal id "${params.id}". Known: ${known.join(", ") || "none"}.`,
+					`Unknown terminal id "${sanitizeTerminalLine(params.id)}". Known: ${known.map(sanitizeTerminalLine).join(", ") || "none"}.`,
 				);
 			}
 
@@ -341,11 +399,11 @@ export default function (pi: ExtensionAPI) {
 			return {
 				content: [{ type: "text", text: buildStatusResult(snap) }],
 				details: {
-					id: snap.id,
+					id: sanitizeTerminalLine(snap.id),
 					status: snap.status,
 					pid: snap.pid,
 					exitCode: snap.exitCode,
-					signal: snap.signal,
+					signal: snap.signal ? sanitizeTerminalLine(snap.signal) : undefined,
 				},
 			};
 		},
@@ -357,6 +415,8 @@ export default function (pi: ExtensionAPI) {
 		description: BG_LIST_TOOL_DESCRIPTION,
 		parameters: Type.Object({}, { additionalProperties: false }),
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
+		renderCall: (_args, theme) => renderToolCall(theme, "bg_list"),
+		renderResult: renderLiteralToolResult,
 		async execute() {
 			const manager = await getManager();
 			const terminals = manager.view.list();
@@ -368,8 +428,8 @@ export default function (pi: ExtensionAPI) {
 				content: [{ type: "text", text }],
 				details: {
 					terminals: terminals.map((snap) => ({
-						id: snap.id,
-						title: snap.title,
+						id: sanitizeTerminalLine(snap.id),
+						title: sanitizeTerminalLine(snap.title),
 						status: snap.status,
 						pid: snap.pid,
 					})),
@@ -392,6 +452,13 @@ export default function (pi: ExtensionAPI) {
 			{ additionalProperties: false },
 		),
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
+		renderCall(args, theme) {
+			const ids = Array.isArray(args.ids)
+				? args.ids.map(stringValue).filter(Boolean).join(", ")
+				: "";
+			return renderToolCall(theme, "bg_kill", ids);
+		},
+		renderResult: renderLiteralToolResult,
 		async execute(_toolCallId, params, signal) {
 			const manager = await getManager();
 			const ids = [...new Set(params.ids)];
@@ -402,7 +469,7 @@ export default function (pi: ExtensionAPI) {
 			const unknown = ids.filter((id) => !manager.view.get(id));
 			if (unknown.length > 0) {
 				throw new Error(
-					`Unknown terminal id(s): ${unknown.join(", ")}. Known: ${known.join(", ") || "none"}.`,
+					`Unknown terminal id(s): ${unknown.map(sanitizeTerminalLine).join(", ")}. Known: ${known.map(sanitizeTerminalLine).join(", ") || "none"}.`,
 				);
 			}
 
@@ -431,8 +498,8 @@ export default function (pi: ExtensionAPI) {
 				content: [{ type: "text", text: buildKillReport(report) }],
 				details: {
 					results: report.map((entry) => ({
-						id: entry.id,
-						title: entry.title,
+						id: sanitizeTerminalLine(entry.id),
+						title: sanitizeTerminalLine(entry.title),
 						status: entry.status,
 						killed: entry.killed,
 					})),

@@ -41,6 +41,33 @@ test("completion output is sanitized and rendered literally instead of as Markdo
 	assert.doesNotMatch(rendered, /\u001b/);
 });
 
+test("completion renderer sanitizes title metadata, OSC 52, bidi, and unterminated controls", () => {
+	const unsafeMessage = {
+		...message,
+		content:
+			"summary\nvisible\u001b]52;c;c2VjcmV0\u0007\u001b[31mred\u001b[0m\u202E\nlast\u001b]52;c;unterminated",
+		details: {
+			...message.details,
+			title:
+				"title\u001b]52;c;dGl0bGU=\u0007\u001b[2J\u2066safe\u2069\u001b]52;c;unterminated",
+			signal: "SIG\u001b[31mTERM\u001b[0m",
+		},
+	};
+	const component = renderTerminalResultMessage(
+		unsafeMessage,
+		{ expanded: true, outputPad: 0 },
+		theme,
+	);
+	assert.ok(component);
+	const rendered = component.render(100).join("\n");
+	assert.match(rendered, /title.*safe/);
+	assert.match(rendered, /visible.*red/);
+	assert.doesNotMatch(
+		rendered,
+		/\u001b|\u009b|\u202E|\u2066|\u2069|c2VjcmV0|dGl0bGU|unterminated/,
+	);
+});
+
 test("completion renderer honors Pi custom-message output padding", () => {
 	const withoutPadding = renderTerminalResultMessage(
 		message,

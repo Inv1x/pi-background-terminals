@@ -6,9 +6,14 @@ import {
 	sanitizeText,
 } from "../src/ui/output-view.ts";
 
-test("sanitizes ANSI, OSC, controls, and tabs before TUI rendering", () => {
-	const unsafe = "\u001b]0;title\u0007\u001b[31mred\u001b[0m\tX\u0000";
-	assert.equal(sanitizeText(unsafe), "red  X");
+test("sanitizes ANSI, OSC 52, controls, bidi, and unterminated escapes idempotently", () => {
+	const unsafe =
+		"\u001b]52;c;c2VjcmV0\u0007\u001b[31mred\u001b[0m\tX\u0000\u202Ertl\u2066isolate\u2069";
+	const safe = sanitizeText(unsafe);
+	assert.equal(safe, "red  Xrtlisolate");
+	assert.equal(sanitizeText(safe), safe);
+	assert.equal(sanitizeText("before\u001b]52;c;unterminated"), "before");
+	assert.equal(sanitizeText("before\u001b[12345"), "before");
 });
 
 test("progress output keeps its final carriage-return state and wraps", () => {

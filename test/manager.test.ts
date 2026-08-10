@@ -11,6 +11,7 @@ import {
 	PI_SESSION_ENVIRONMENT_KEYS,
 	type TerminalManager,
 } from "../src/manager.ts";
+import { buildStatusResult } from "../src/prompt.ts";
 import { createDeferredResultDelivery } from "../src/result-delivery.ts";
 import { createTerminalRuntime, runTool } from "../src/runtime.ts";
 
@@ -132,6 +133,24 @@ test("captures stdout/stderr separately, observes stdin EOF, and settles once", 
 				"out\neof\n",
 			);
 		}
+	});
+});
+
+test("raw capture and spill retain terminal controls while tool output is literal", async () => {
+	await withManager(async (manager) => {
+		const raw = "\u001b]52;c;c2VjcmV0\u0007\u001b[31mred\u001b[0m\u202E";
+		const started = await manager.start({
+			command: nodeCommand(`process.stdout.write(${JSON.stringify(raw)})`),
+			title: "raw spill",
+			cwd: process.cwd(),
+		});
+		const done = await settled(manager, started.id);
+		assert.equal(done.stdout.text, raw);
+		assert.ok(done.stdout.spillPath);
+		assert.equal(fs.readFileSync(done.stdout.spillPath, "utf8"), raw);
+		const status = buildStatusResult(done);
+		assert.match(status, /red/);
+		assert.doesNotMatch(status, /\u001b|\u202E|c2VjcmV0/);
 	});
 });
 

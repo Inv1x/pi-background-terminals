@@ -1,6 +1,6 @@
 import type { MessageRenderer } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { sanitizeText } from "./ui/output-view.ts";
+import { sanitizeTerminalLine, sanitizeTerminalText } from "./terminal-text.ts";
 
 export interface TerminalResultDetails {
 	readonly id?: string;
@@ -24,9 +24,9 @@ export const renderTerminalResultMessage: MessageRenderer<
 			: theme.fg("success", "■");
 	const how = killed
 		? "killed"
-		: sanitizeText(details.signal ?? `exit ${details.exitCode ?? "?"}`);
-	const id = sanitizeText(details.id ?? "?");
-	const title = sanitizeText(details.title ?? "");
+		: sanitizeTerminalLine(details.signal ?? `exit ${details.exitCode ?? "?"}`);
+	const id = sanitizeTerminalLine(details.id ?? "?");
+	const title = sanitizeTerminalLine(details.title ?? "");
 	const header =
 		`${icon} ` +
 		theme.fg("accent", theme.bold(`terminal ${id}`)) +
@@ -35,7 +35,9 @@ export const renderTerminalResultMessage: MessageRenderer<
 	const content = typeof message.content === "string" ? message.content : "";
 	// The first line duplicates the themed summary. Everything after it is
 	// untrusted process output: strip terminal controls, but never parse Markdown.
-	const body = sanitizeText(content.split("\n").slice(1).join("\n").trim());
+	const body = sanitizeTerminalText(
+		content.split("\n").slice(1).join("\n"),
+	).trim();
 	const bodyLines = body ? body.split("\n") : [];
 	const visibleLines = expanded ? bodyLines : bodyLines.slice(0, 8);
 	let text = header;

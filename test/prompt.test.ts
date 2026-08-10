@@ -4,8 +4,11 @@ import type { OutputView, TerminalSnapshot } from "../src/domain.ts";
 import {
 	BG_START_PARAMETER_DESCRIPTIONS,
 	BG_START_TOOL_DESCRIPTION,
+	buildKillReport,
+	buildStartResult,
 	buildStatusResult,
 	buildTerminalResultMessage,
+	describeTerminal,
 } from "../src/prompt.ts";
 
 const empty: OutputView = { text: "", totalBytes: 0, truncatedBytes: 0 };
@@ -54,6 +57,42 @@ test("status and completion expose bounded tails and spill pointers", () => {
 	assert.match(result, /exited \(exit 2\)/);
 	assert.match(result, /line-499/);
 	assert.ok(result.length < status.length);
+});
+
+test("all tool-result builders make titles, output, errors, and spill paths terminal-literal", () => {
+	const osc52 = "\u001b]52;c;c2VjcmV0\u0007";
+	const unsafe = `${osc52}\u001b[31mVISIBLE\u001b[0m\u202E\u0000`;
+	const snap = snapshot({
+		title: `title-${unsafe}`,
+		cwd: `/tmp/${unsafe}`,
+		signal: unsafe,
+		errorText: unsafe,
+		stdout: {
+			text: `${unsafe}\nend\u001b]52;c;unterminated`,
+			totalBytes: 100_000,
+			truncatedBytes: 1,
+			spillPath: `/tmp/${unsafe}.log`,
+		},
+	});
+	const rendered = [
+		buildStartResult(snap),
+		describeTerminal(snap),
+		buildStatusResult(snap),
+		buildTerminalResultMessage(snap),
+		buildKillReport([
+			{
+				id: snap.id,
+				title: snap.title,
+				status: snap.status,
+				wasRunning: false,
+				killed: false,
+				exit: unsafe,
+			},
+		]),
+	].join("\n");
+	assert.match(rendered, /VISIBLE/);
+	assert.doesNotMatch(rendered, /\u001b|\u009b|\u202E|\u0000|c2VjcmV0/);
+	assert.doesNotMatch(rendered, /unterminated/);
 });
 
 test("truncated output never claims /ps has a full log without a spill", () => {

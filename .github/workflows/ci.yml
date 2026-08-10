@@ -19,3 +19,18 @@ jobs:
       - run: npm ci
       - run: npm run verify
       - run: npm pack --dry-run
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run typecheck
+      # Cross-platform boundary coverage exercises cmd.exe spawning and taskkill;
+      # POSIX process-group tests remain in the Ubuntu verify job.
+      - run: node --import jiti/register --test test/output.test.ts test/ui.test.ts test/prompt.test.ts test/result-renderer.test.ts test/extension-boundary.test.ts
