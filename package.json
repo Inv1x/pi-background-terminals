@@ -51,11 +51,15 @@
 		"check:fix": "biome check --write .",
 		"typecheck": "tsc --noEmit",
 		"test": "node --import jiti/register --test test/*.test.ts",
+		"changeset": "changeset",
+		"release:status": "changeset status",
+		"release:version": "changeset version && npm install --package-lock-only --ignore-scripts --no-audit --no-fund",
 		"verify": "npm run check && npm run typecheck && npm test",
 		"prepack": "npm run verify"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.5",
+		"@changesets/cli": "2.31.1",
 		"@earendil-works/pi-coding-agent": "0.84.1",
 		"@earendil-works/pi-tui": "0.84.1",
 		"@types/node": "^26.1.1",
