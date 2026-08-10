@@ -128,7 +128,11 @@ function createBoundaryHarness() {
 	};
 }
 
-test("all extension tool call/result render paths reject title and process-output injection", async () => {
+test("all extension tool call/result render paths reject title and process-output injection", async (t) => {
+	if (process.platform === "win32") {
+		t.skip("cmd.exe cannot portably transport the raw control-byte fixture");
+		return;
+	}
 	const harness = createBoundaryHarness();
 	await harness.emit("session_start");
 	const start = harness.tools.get("bg_start");
