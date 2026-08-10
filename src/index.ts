@@ -51,7 +51,7 @@ import {
 	runTool,
 	type TerminalRuntime,
 } from "./runtime.ts";
-import { sanitizeTerminalLine, sanitizeTerminalText } from "./terminal-text.ts";
+import { sanitizeTerminalLine } from "./terminal-text.ts";
 import { openTerminalInspector } from "./ui/ps.ts";
 import {
 	UI_CUSTOMIZATION_STATUS_ACTIVATION_EVENT,
@@ -77,25 +77,7 @@ function stringValue(value: unknown): string {
 	return typeof value === "string" ? value : "";
 }
 
-/** Literal tool-result renderer shared by all four tools. Tool result builders
- * already sanitize at the API boundary; the idempotent pass here protects
- * extension calls that provide synthetic or stale result objects. */
-function renderLiteralToolResult(
-	result: { content: ReadonlyArray<{ type: string; text?: string }> },
-	_options: unknown,
-	theme: Theme,
-) {
-	const text = result.content
-		.filter(
-			(item): item is { type: string; text: string } =>
-				item.type === "text" && typeof item.text === "string",
-		)
-		.map((item) => item.text)
-		.join("\n");
-	return new Text(theme.fg("toolOutput", sanitizeTerminalText(text)), 0, 0);
-}
-
-function renderToolCall(theme: Theme, label: string, summary = "") {
+function renderCompactMetadata(theme: Theme, label: string, summary = "") {
 	const title = theme.fg("toolTitle", theme.bold(label));
 	return new Text(
 		summary
@@ -103,6 +85,70 @@ function renderToolCall(theme: Theme, label: string, summary = "") {
 			: title,
 		0,
 		0,
+	);
+}
+
+function record(value: unknown): Record<string, unknown> {
+	return value !== null && typeof value === "object"
+		? (value as Record<string, unknown>)
+		: {};
+}
+
+function renderStartResult(
+	result: { details?: unknown },
+	_options: unknown,
+	theme: Theme,
+) {
+	const details = record(result.details);
+	const id = stringValue(details.id) || "terminal";
+	const title = stringValue(details.title);
+	return renderCompactMetadata(theme, id, title);
+}
+
+function renderStatusResult(
+	result: { details?: unknown },
+	_options: unknown,
+	theme: Theme,
+) {
+	const details = record(result.details);
+	const id = stringValue(details.id) || "terminal";
+	const status = stringValue(details.status);
+	return renderCompactMetadata(theme, id, status);
+}
+
+function renderListResult(
+	result: { details?: unknown },
+	_options: unknown,
+	theme: Theme,
+) {
+	const value = record(result.details).terminals;
+	const terminals = Array.isArray(value) ? value : [];
+	const running = terminals.filter(
+		(item) => stringValue(record(item).status) === "running",
+	).length;
+	return renderCompactMetadata(
+		theme,
+		"bg_list",
+		`${terminals.length} tracked · ${running} running`,
+	);
+}
+
+function renderKillResult(
+	result: { details?: unknown },
+	_options: unknown,
+	theme: Theme,
+) {
+	const value = record(result.details).results;
+	const results = Array.isArray(value) ? value : [];
+	const statuses = [
+		...new Set(
+			results.map((item) => stringValue(record(item).status)).filter(Boolean),
+		),
+	];
+	return renderCompactMetadata(
+		theme,
+		"bg_kill",
+		`${results.length} terminal${results.length === 1 ? "" : "s"}${statuses.length > 0 ? ` · ${statuses.join(", ")}` : ""}`,
 	);
 }
 
@@ -132,7 +178,10 @@ function prepareBgStartArguments(args: unknown): Static<typeof BgStartParams> {
 
 export default function (pi: ExtensionAPI) {
 	let runtime: TerminalRuntime | undefined;
-	let managerPromise: Promise<TerminalManager> | undefined;
+	let wiredManager: TerminalManager | undefined;
+	let sessionGeneration = 0;
+	let managerGeneration = -1;
+	let shuttingDown = false;
 	let sessionContext: ExtensionContext | undefined;
 	let sessionAbort: AbortController | undefined;
 	let ui: ExtensionUIContext | undefined;
@@ -142,16 +191,21 @@ export default function (pi: ExtensionAPI) {
 
 	const getRuntime = () => (runtime ??= createTerminalRuntime());
 
-	/** Resolve the manager service once per runtime and wire the extension hooks. */
+	/** Initialize and wire the current session's synchronous manager atomically. */
 	const getManager = () => {
-		managerPromise ??= Promise.resolve(getRuntime().manager).then((manager) => {
-			manager.view.setOnSettled(onSettled);
+		if (shuttingDown)
+			throw new Error("Background terminal session is shutting down.");
+		const manager = getRuntime().manager;
+		if (wiredManager !== manager || managerGeneration !== sessionGeneration) {
 			unsubStatus?.();
+			wiredManager?.view.setOnSettled(undefined);
+			wiredManager = manager;
+			managerGeneration = sessionGeneration;
+			manager.view.setOnSettled(onSettled);
 			unsubStatus = manager.view.subscribe(() => updateStatus(manager));
 			updateStatus(manager);
-			return manager;
-		});
-		return managerPromise;
+		}
+		return manager;
 	};
 
 	/** One-line footer status, only while ≥1 terminal is running. Called on
@@ -186,7 +240,7 @@ export default function (pi: ExtensionAPI) {
 				{
 					customType: "background-terminal-result",
 					content: buildTerminalResultMessage(snap),
-					display: true,
+					display: false,
 					details: {
 						id: sanitizeTerminalLine(snap.id),
 						title: sanitizeTerminalLine(snap.title),
@@ -220,18 +274,14 @@ export default function (pi: ExtensionAPI) {
 		// Always retain the automatic delivery until the bg_kill tool has
 		// successfully returned. An aborted tool wait must not consume a process
 		// settlement even though its termination continues in the background.
-		resultDelivery.defer({
-			...snap,
-			stdout: { ...snap.stdout },
-			stderr: { ...snap.stderr },
-		});
+		resultDelivery.defer(snap);
 		// Held kill results are skipped by drains while the tool still has the
 		// opportunity to return this exact settlement itself.
 		if (!killPending && sessionContext?.isIdle()) flushResults();
 	};
 
 	const openPs = async (ctx: ExtensionContext) => {
-		const manager = await getManager();
+		const manager = getManager();
 		if (ctx.mode !== "tui") {
 			if (ctx.hasUI) {
 				const terminals = manager.view.list();
@@ -255,6 +305,8 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		shuttingDown = false;
+		sessionGeneration++;
 		const statusOptions: UIStatusOptionsEvent = {
 			key: STATUS_KEY,
 			preserveSelectedColors: true,
@@ -295,6 +347,8 @@ export default function (pi: ExtensionAPI) {
 	// disposeAll → every entry scope → SIGTERM→SIGKILL tree kill, each close
 	// bounded so a wedged process cannot hang shutdown.
 	pi.on("session_shutdown", async () => {
+		shuttingDown = true;
+		sessionGeneration++;
 		sessionContext = undefined;
 		sessionAbort?.abort();
 		sessionAbort = undefined;
@@ -312,7 +366,9 @@ export default function (pi: ExtensionAPI) {
 		ui = undefined;
 		const closing = runtime;
 		runtime = undefined;
-		managerPromise = undefined;
+		wiredManager?.view.setOnSettled(undefined);
+		wiredManager = undefined;
+		managerGeneration = -1;
 		await closing?.dispose();
 	});
 
@@ -329,22 +385,20 @@ export default function (pi: ExtensionAPI) {
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		renderCall(args, theme) {
 			const title = stringValue(args.title) || "terminal";
-			const command = stringValue(args.command);
-			const cwd = stringValue(args.working_dir);
-			const summary = `"${title}"${command ? ` · ${command}` : ""}${cwd ? ` · ${cwd}` : ""}`;
-			return renderToolCall(theme, "bg_start", summary);
+			return renderCompactMetadata(theme, "bg_start", title);
 		},
-		renderResult: renderLiteralToolResult,
+		renderResult: renderStartResult,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const manager = await getManager();
+			const manager = getManager();
 
 			const command = params.command.trim();
 			if (!command) throw new Error("command must not be empty.");
 
-			const cwd = path.resolve(ctx.cwd, params.working_dir ?? ".");
+			const requestedDirectory = params.working_dir ?? ".";
+			const cwd = path.normalize(path.resolve(ctx.cwd, requestedDirectory));
 			let isDirectory = false;
 			try {
-				isDirectory = fs.existsSync(cwd) && fs.statSync(cwd).isDirectory();
+				isDirectory = (await fs.promises.stat(cwd)).isDirectory();
 			} catch {
 				// Report only the literal path below; native fs errors may echo it raw.
 			}
@@ -356,10 +410,7 @@ export default function (pi: ExtensionAPI) {
 
 			const title =
 				sanitizeTerminalLine(params.title).slice(0, 80) || "terminal";
-			const snap = await runTool(
-				getRuntime(),
-				manager.start({ command, title, cwd }),
-			);
+			const snap = await runTool(manager.start({ command, title, cwd }));
 
 			return {
 				content: [{ type: "text", text: buildStartResult(snap) }],
@@ -388,17 +439,11 @@ export default function (pi: ExtensionAPI) {
 		),
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		renderCall: (args, theme) =>
-			renderToolCall(theme, "bg_status", stringValue(args.id)),
-		renderResult: renderLiteralToolResult,
+			renderCompactMetadata(theme, "bg_status", stringValue(args.id)),
+		renderResult: renderStatusResult,
 		async execute(_toolCallId, params) {
-			const manager = await getManager();
-			const snap = manager.view.get(params.id);
-			if (!snap) {
-				const known = manager.view.list().map((s) => s.id);
-				throw new Error(
-					`Unknown terminal id "${sanitizeTerminalLine(params.id)}". Known: ${known.map(sanitizeTerminalLine).join(", ") || "none"}.`,
-				);
-			}
+			const manager = getManager();
+			const snap = await manager.status(params.id);
 
 			// This status is returning the settlement itself; a pending automatic
 			// follow-up for the same settle would be a duplicate.
@@ -423,10 +468,10 @@ export default function (pi: ExtensionAPI) {
 		description: BG_LIST_TOOL_DESCRIPTION,
 		parameters: Type.Object({}, { additionalProperties: false }),
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
-		renderCall: (_args, theme) => renderToolCall(theme, "bg_list"),
-		renderResult: renderLiteralToolResult,
+		renderCall: (_args, theme) => renderCompactMetadata(theme, "bg_list"),
+		renderResult: renderListResult,
 		async execute() {
-			const manager = await getManager();
+			const manager = getManager();
 			const terminals = manager.view.list();
 			const text =
 				terminals.length === 0
@@ -464,28 +509,18 @@ export default function (pi: ExtensionAPI) {
 			const ids = Array.isArray(args.ids)
 				? args.ids.map(stringValue).filter(Boolean).join(", ")
 				: "";
-			return renderToolCall(theme, "bg_kill", ids);
+			return renderCompactMetadata(theme, "bg_kill", ids);
 		},
-		renderResult: renderLiteralToolResult,
+		renderResult: renderKillResult,
 		async execute(_toolCallId, params, signal) {
-			const manager = await getManager();
+			const manager = getManager();
 			const ids = [...new Set(params.ids)];
-			if (ids.length === 0)
-				throw new Error("Provide at least one terminal id.");
-
-			const known = manager.view.list().map((snap) => snap.id);
-			const unknown = ids.filter((id) => !manager.view.get(id));
-			if (unknown.length > 0) {
-				throw new Error(
-					`Unknown terminal id(s): ${unknown.map(sanitizeTerminalLine).join(", ")}. Known: ${known.map(sanitizeTerminalLine).join(", ") || "none"}.`,
-				);
-			}
 
 			const releaseDelivery = resultDelivery.hold(ids);
 			const operation = manager.kill(ids);
 			let report: Awaited<typeof operation>;
 			try {
-				report = await runTool(getRuntime(), operation, {
+				report = await runTool(operation, {
 					signal,
 					interruptMessage:
 						"Kill wait aborted; termination continues in the background.",

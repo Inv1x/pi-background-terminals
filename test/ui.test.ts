@@ -14,6 +14,10 @@ test("sanitizes ANSI, OSC 52, controls, bidi, and unterminated escapes idempoten
 	assert.equal(sanitizeText(safe), safe);
 	assert.equal(sanitizeText("before\u001b]52;c;unterminated"), "before");
 	assert.equal(sanitizeText("before\u001b[12345"), "before");
+	assert.equal(
+		sanitizeText("paired 😀 lone \ud800 and \udfff"),
+		"paired 😀 lone � and �",
+	);
 });
 
 test("progress output keeps its final carriage-return state and wraps", () => {

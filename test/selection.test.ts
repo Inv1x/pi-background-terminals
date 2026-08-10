@@ -315,10 +315,10 @@ test("inspector arrows select while j/k scroll output and labels keys consistent
 	assert.match(render(), /Esc\/Ctrl\+C\/q close/);
 	assert.doesNotMatch(render(), /\besc\b|\bescape\b/);
 
-	component.handleInput?.("k");
+	component.handleInput?.("\u001b[107u"); // Kitty plain k
 	assert.match(render(), /Terminal\s+bt-1/);
 	assert.match(render(), /lines below/);
-	component.handleInput?.("j");
+	component.handleInput?.("\u001b[106u"); // Kitty plain j
 	assert.match(render(), /Terminal\s+bt-1/);
 
 	component.handleInput?.("\u001b[B");
@@ -337,7 +337,7 @@ test("inspector arrows select while j/k scroll output and labels keys consistent
 	component.handleInput?.("g");
 	assert.match(render(), /Terminal\s+bt-1/);
 
-	component.handleInput?.("q");
+	component.handleInput?.("\u001b[113u"); // Kitty plain q
 	await opened;
 	assert.equal(harness.subscriptions(), 0);
 });

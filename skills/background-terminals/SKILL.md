@@ -17,7 +17,7 @@ Call `bg_start` with:
 
 Background commands receive no stdin. Never use them for interactive prompts.
 
-After starting, continue useful work instead of polling. The terminal sends one completion message when it exits.
+After starting, continue useful work instead of polling. The terminal sends one model-visible completion message when it exits; that message stays hidden from the user's transcript.
 
 ## Inspect and stop
 
@@ -26,4 +26,4 @@ After starting, continue useful work instead of polling. The terminal sends one 
 - Use `bg_kill` when a process is no longer needed or is stuck; termination continues even if the tool wait is aborted.
 - Tell the user they can open `/ps` to inspect live output and kill terminals interactively.
 
-Prefer meaningful titles and avoid starting duplicate servers or watchers. Tool and completion output shows a concise tail. `/ps` shows retained tails and links a private complete spill log when one is available; spill failures or safety budgets can make earlier output unavailable. Terminals are session-scoped and are stopped during shutdown or reload.
+Prefer meaningful titles and avoid starting duplicate servers or watchers. Tool output remains available to the model, while transcript rows stay metadata-only and cannot expand with Ctrl+O. `/ps` is the detailed user-facing surface: it shows retained tails and links a private complete spill log when one is available. Settled terminals and spill resources remain there for five minutes; spill failures or safety budgets can make earlier output unavailable. Terminals are session-scoped and are stopped during shutdown or reload.

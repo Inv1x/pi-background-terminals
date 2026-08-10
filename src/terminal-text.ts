@@ -60,7 +60,8 @@ function escapeEnd(text: string, start: number): number {
 /**
  * Return terminal-literal text: LF is preserved and tabs are expanded, while
  * ANSI/ECMA-48 sequences (including unterminated strings), C0/C1 controls, and
- * Unicode format/bidi controls are removed. This function is idempotent.
+ * Unicode format/bidi controls are removed; lone UTF-16 surrogates are replaced.
+ * This function is idempotent.
  */
 export function sanitizeTerminalText(text: string): string {
 	let safe = "";
@@ -96,9 +97,11 @@ export function sanitizeTerminalText(text: string): string {
 			index++;
 			continue;
 		}
-		const character = String.fromCodePoint(text.codePointAt(index) ?? code);
+		const point = text.codePointAt(index) ?? code;
+		const loneSurrogate = code >= 0xd800 && code <= 0xdfff && point === code;
+		const character = loneSurrogate ? "�" : String.fromCodePoint(point);
 		if (!FORMAT_CHARACTER.test(character)) safe += character;
-		index += character.length;
+		index += loneSurrogate ? 1 : character.length;
 	}
 	return safe;
 }

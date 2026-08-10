@@ -1,6 +1,6 @@
 import type { MessageRenderer } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { sanitizeTerminalLine, sanitizeTerminalText } from "./terminal-text.ts";
+import { sanitizeTerminalLine } from "./terminal-text.ts";
 
 export interface TerminalResultDetails {
 	readonly id?: string;
@@ -10,10 +10,10 @@ export interface TerminalResultDetails {
 	readonly signal?: string;
 }
 
-/** Render captured terminal text literally; only Pi theme styling is interpreted. */
+/** Historical completion rows stay metadata-only, regardless of expansion. */
 export const renderTerminalResultMessage: MessageRenderer<
 	TerminalResultDetails
-> = (message, { expanded, outputPad }, theme) => {
+> = (message, { outputPad }, theme) => {
 	const details = message.details ?? {};
 	const failed = details.status === "failed";
 	const killed = details.status === "killed";
@@ -27,27 +27,14 @@ export const renderTerminalResultMessage: MessageRenderer<
 		: sanitizeTerminalLine(details.signal ?? `exit ${details.exitCode ?? "?"}`);
 	const id = sanitizeTerminalLine(details.id ?? "?");
 	const title = sanitizeTerminalLine(details.title ?? "");
-	const header =
+	const summary =
 		`${icon} ` +
 		theme.fg("accent", theme.bold(`terminal ${id}`)) +
-		theme.fg("muted", ` · ${title} · ${how}`);
-
-	const content = typeof message.content === "string" ? message.content : "";
-	// The first line duplicates the themed summary. Everything after it is
-	// untrusted process output: strip terminal controls, but never parse Markdown.
-	const body = sanitizeTerminalText(
-		content.split("\n").slice(1).join("\n"),
-	).trim();
-	const bodyLines = body ? body.split("\n") : [];
-	const visibleLines = expanded ? bodyLines : bodyLines.slice(0, 8);
-	let text = header;
-	for (const line of visibleLines) text += `\n${theme.fg("toolOutput", line)}`;
-	if (!expanded && bodyLines.length > visibleLines.length)
-		text += `\n${theme.fg("dim", "... (Ctrl+O to expand)")}`;
+		theme.fg("muted", `${title ? ` · ${title}` : ""} · ${how}`);
 
 	const box = new Box(outputPad, 1, (line) =>
 		theme.bg("customMessageBg", line),
 	);
-	box.addChild(new Text(text, 0, 0));
+	box.addChild(new Text(summary, 0, 0));
 	return box;
 };

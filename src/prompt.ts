@@ -7,7 +7,7 @@ import {
 	truncateTail,
 } from "@earendil-works/pi-coding-agent";
 import { formatElapsed, formatExit, type TerminalSnapshot } from "./domain.ts";
-import { type KillResult, MAX_RUNNING } from "./manager.ts";
+import { type KillResult, MAX_RUNNING, MAX_TRACKED } from "./manager.ts";
 import { sanitizeTerminalLine, sanitizeTerminalText } from "./terminal-text.ts";
 
 /** bg_status stdout tail. */
@@ -25,10 +25,10 @@ const RESULT_STDERR_MAX_LINES = 20;
 
 export const BG_START_TOOL_DESCRIPTION =
 	"Start a long-running shell command as a background terminal (executed via the platform shell — sh -c on POSIX, cmd.exe /d /s /c on Windows). " +
-	"Fire-and-forget: this returns immediately with an id, and you get a message with the final output when the process exits. " +
+	"Fire-and-forget: this returns immediately with an id, and you get a model-visible, transcript-quiet message with the final output when the process exits. " +
 	"The process receives NO stdin (immediate EOF) and there is no way to send input later — interactive commands will not work; use bg_kill to stop a stuck one. " +
-	`Terminals are session-scoped: they are killed when the session ends or reloads. Output shown to you is tail-truncated (stdout ${formatSize(STATUS_STDOUT_MAX)}, stderr ${formatSize(STATUS_STDERR_MAX)}); /ps shows retained tails and points to a private spill file when a complete spill is available. ` +
-	`Max ${MAX_RUNNING} background terminals can run at once.`;
+	`Terminals are session-scoped: they are killed when the session ends or reloads. Settled terminals remain available to /ps for five minutes. Output shown to you is tail-truncated (stdout ${formatSize(STATUS_STDOUT_MAX)}, stderr ${formatSize(STATUS_STDERR_MAX)}); /ps is the user's detailed output surface, showing retained tails and a private spill path when a complete spill is available. ` +
+	`Max ${MAX_RUNNING} background terminals can run at once and ${MAX_TRACKED} running-or-retained terminals can be tracked; the latter bound rejects new starts rather than shortening retention.`;
 
 export const BG_START_PROMPT_SNIPPET =
 	"Run a long-lived shell command in the background (dev servers, builds, watchers); output is captured and you're notified on exit";
@@ -54,7 +54,7 @@ export const BG_STATUS_PARAMETER_DESCRIPTIONS = {
 };
 
 export const BG_LIST_TOOL_DESCRIPTION =
-	"List all background terminals (running and settled) with pid, elapsed time, exit status, and output sizes.";
+	"List running background terminals and terminals settled within the last five minutes, with pid, elapsed time, exit status, and output sizes.";
 
 export const BG_KILL_TOOL_DESCRIPTION =
 	"Stop one or more running background terminals (SIGTERM to the whole process tree, escalating to SIGKILL). Returns each terminal's final state; already-settled ids are reported as such.";

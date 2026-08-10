@@ -8,8 +8,8 @@ Session-scoped background terminals for [Pi](https://github.com/earendil-works/p
 - No stdin surface: background commands receive EOF and cannot prompt interactively.
 - Separate bounded stdout and stderr tails, plus best-effort private session-lifetime spill logs.
 - Whole-tree termination: POSIX process groups or Windows `taskkill /T`, escalating to force termination.
-- Exactly-once deferred completion follow-ups, a selectable running-count footer status, and a read-only two-pane `/ps` inspector compatible with regular and fullscreen TUI modes.
-- Literal, control-sanitized completion rendering: terminal output is never interpreted as Markdown.
+- Exactly-once, model-visible completion follow-ups that stay hidden from the transcript, plus a selectable running-count footer status.
+- A read-only two-pane `/ps` inspector—the sole detailed user-facing output surface—compatible with regular and fullscreen TUI modes.
 - Strict-preferred JSON Schema tool sampling where the active provider supports it.
 - Cleanup of all processes and temporary logs on session shutdown or reload.
 
@@ -38,11 +38,11 @@ Ask Pi to start a long-running command, for example:
 Start npm run dev in the background and continue with the implementation.
 ```
 
-Use `/ps` to inspect live stdout/stderr or kill a terminal interactively. The inspector uses `Up`/`Down` to select terminals, `g`/`G` to jump to the first/last terminal, `j`/`k` to scroll output, `t` to switch stdout/stderr, `x` to kill a running terminal, `r` to refresh, and `Esc`, `Ctrl+C`, or `q` to close. With `pi-ui-customization` loaded, an empty editor can use `Up`/`Down` to select the running-terminal footer row and `Enter` to open the same view; its accent color is preserved while selected. The model can use `bg_status`, `bg_list`, and `bg_kill` directly. Prefer Pi's regular shell tool for quick commands.
+Use `/ps` to inspect live stdout/stderr or kill a terminal interactively. Completed terminals remain there for exactly five minutes after settlement, then disappear without disturbing selection of another terminal. The inspector uses `Up`/`Down` to select terminals, `g`/`G` to jump to the first/last terminal, `j`/`k` to scroll output, `t` to switch stdout/stderr, `x` to kill a running terminal, `r` to refresh, and `Esc`, `Ctrl+C`, or `q` to close. With `pi-ui-customization` loaded, editor footer navigation can use `Up`/`Down` to select the running-terminal footer row and `Enter` to open the same view; its accent color is preserved while selected. The model can use `bg_status`, `bg_list`, and `bg_kill` directly. Prefer Pi's regular shell tool for quick commands.
 
 ## Safety and limits
 
-Commands execute through `/bin/sh -c` on POSIX and `cmd.exe /d /s /c` on Windows with your user permissions. This package is process management, not a sandbox. In-memory capture retains the latest 2 MiB per stream per terminal. Best-effort spill files have a 256 MiB per-stream and 512 MiB session-wide safety cap; `/ps` identifies when earlier output is unavailable. Spill files are deleted when records are pruned and during shutdown.
+Commands execute through `/bin/sh -c` on POSIX and `cmd.exe /d /s /c` on Windows with your user permissions. This package is process management, not a sandbox. At most 32 running-or-retained terminals are tracked; new starts are rejected at that safety limit rather than evicting a record before its five-minute TTL. In-memory capture retains the latest 2 MiB per stream per terminal. Best-effort spill files have a 256 MiB per-stream and 512 MiB session-wide safety cap; `/ps` identifies when earlier output is unavailable. A settled terminal and its spill resources are deleted five minutes after `settledAt`, while running terminals remain tracked until settlement or session shutdown.
 
 Background children do not receive Pi's session-specific `PI_SESSION_ID`, `PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL`, or `PI_REASONING_LEVEL` values by default. They still inherit ordinary ambient variables, including Pi CLI/RPC process markers `AI_AGENT=pi` and `PI_CODING_AGENT=true` when those are present. Do not treat either marker as a secret or a sandbox boundary.
 

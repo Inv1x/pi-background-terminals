@@ -14,7 +14,7 @@ const message: Parameters<typeof renderTerminalResultMessage>[0] = {
 	role: "custom",
 	customType: "background-terminal-result",
 	content:
-		"summary\n# heading\n- list item\n**not bold**\n<script>literal</script>\n\u001b[31mred\u001b[0m",
+		"summary\nsecret stdout\n# heading\n\u001b[31mred\u001b[0m\n/tmp/secret",
 	display: true,
 	details: {
 		id: "bt-1",
@@ -25,27 +25,30 @@ const message: Parameters<typeof renderTerminalResultMessage>[0] = {
 	timestamp: Date.now(),
 };
 
-test("completion output is sanitized and rendered literally instead of as Markdown", () => {
+function render(expanded: boolean, outputPad = 0) {
 	const component = renderTerminalResultMessage(
 		message,
-		{ expanded: true, outputPad: 0 },
+		{ expanded, outputPad },
 		theme,
 	);
 	assert.ok(component);
-	const rendered = component.render(80).join("\n");
-	assert.match(rendered, /# heading/);
-	assert.match(rendered, /- list item/);
-	assert.match(rendered, /\*\*not bold\*\*/);
-	assert.match(rendered, /<script>literal<\/script>/);
-	assert.match(rendered, /red/);
-	assert.doesNotMatch(rendered, /\u001b/);
+	return component.render(80).join("\n");
+}
+
+test("historical completion renderer is compact and expansion-invariant", () => {
+	const collapsed = render(false);
+	const expanded = render(true);
+	assert.equal(expanded, collapsed);
+	assert.match(expanded, /terminal bt-1 · literal · exit 0/);
+	assert.doesNotMatch(
+		expanded,
+		/secret stdout|heading|red|\/tmp\/secret|Ctrl\+O|\u001b/,
+	);
 });
 
-test("completion renderer sanitizes title metadata, OSC 52, bidi, and unterminated controls", () => {
+test("completion renderer sanitizes metadata controls", () => {
 	const unsafeMessage = {
 		...message,
-		content:
-			"summary\nvisible\u001b]52;c;c2VjcmV0\u0007\u001b[31mred\u001b[0m\u202E\nlast\u001b]52;c;unterminated",
 		details: {
 			...message.details,
 			title:
@@ -61,27 +64,16 @@ test("completion renderer sanitizes title metadata, OSC 52, bidi, and unterminat
 	assert.ok(component);
 	const rendered = component.render(100).join("\n");
 	assert.match(rendered, /title.*safe/);
-	assert.match(rendered, /visible.*red/);
+	assert.match(rendered, /SIGTERM/);
 	assert.doesNotMatch(
 		rendered,
-		/\u001b|\u009b|\u202E|\u2066|\u2069|c2VjcmV0|dGl0bGU|unterminated/,
+		/\u001b|\u009b|\u202E|\u2066|\u2069|dGl0bGU|unterminated/,
 	);
 });
 
 test("completion renderer honors Pi custom-message output padding", () => {
-	const withoutPadding = renderTerminalResultMessage(
-		message,
-		{ expanded: false, outputPad: 0 },
-		theme,
-	);
-	const withPadding = renderTerminalResultMessage(
-		message,
-		{ expanded: false, outputPad: 1 },
-		theme,
-	);
-	assert.ok(withoutPadding && withPadding);
-	const unpaddedLines = withoutPadding.render(80);
-	const paddedLines = withPadding.render(80);
+	const unpaddedLines = render(false, 0).split("\n");
+	const paddedLines = render(false, 1).split("\n");
 	const unpaddedContent = unpaddedLines.find((line) =>
 		line.includes("terminal"),
 	);

@@ -11,9 +11,11 @@ import {
 	UnknownTerminalError,
 } from "./domain.ts";
 import { OutputBuffer } from "./output.ts";
+import { sanitizeTerminalLine } from "./terminal-text.ts";
 
 export const MAX_RUNNING = 8;
 export const MAX_TRACKED = 32;
+export const SETTLED_RETENTION_MS = 5 * 60 * 1000;
 export const RETAINED_PER_STREAM = 2 * 1024 * 1024;
 export const MAX_SPILL_BYTES_PER_STREAM = 256 * 1024 * 1024;
 export const MAX_SPILL_BYTES_PER_SESSION = 512 * 1024 * 1024;
@@ -71,9 +73,13 @@ interface Entry {
 	processErrored: boolean;
 	exited: boolean;
 	stdioClosed: boolean;
+	outputFrozen: boolean;
 	settling?: Promise<void>;
 	termination?: Promise<void>;
-	exitCleanupStarted: boolean;
+	exitCleanupTimer?: ReturnType<typeof setTimeout>;
+	retentionTimer?: ReturnType<typeof setTimeout>;
+	stdoutData?: (chunk: string) => void;
+	stderrData?: (chunk: string) => void;
 }
 
 export interface StartOptions {
@@ -106,6 +112,7 @@ export interface TerminalReadModel {
 export interface TerminalManagerOptions {
 	/** Test/integration overrides; production callers use the bounded defaults. */
 	readonly maxTracked?: number;
+	readonly settledRetentionMs?: number;
 	readonly retainedPerStream?: number;
 	readonly maxSpillBytesPerStream?: number;
 	readonly maxSpillBytesPerSession?: number;
@@ -141,6 +148,31 @@ function boundedError(error: unknown) {
 		0,
 		ERROR_TEXT_MAX_LENGTH,
 	);
+}
+
+/** Detach one coherent public value from the live output accessors. */
+export function detachTerminalSnapshot(
+	snapshot: TerminalSnapshot,
+): TerminalSnapshot {
+	// Each accessor is intentionally read once: joining a large live buffer twice
+	// is wasteful and could mix versions if this helper ever gains an await.
+	const stdout = snapshot.stdout;
+	const stderr = snapshot.stderr;
+	return {
+		id: snapshot.id,
+		command: snapshot.command,
+		title: snapshot.title,
+		cwd: snapshot.cwd,
+		pid: snapshot.pid,
+		status: snapshot.status,
+		createdAt: snapshot.createdAt,
+		settledAt: snapshot.settledAt,
+		exitCode: snapshot.exitCode,
+		signal: snapshot.signal,
+		errorText: snapshot.errorText,
+		stdout: { ...stdout },
+		stderr: { ...stderr },
+	};
 }
 
 function appendError(snapshot: MutableSnapshot, text: string) {
@@ -242,6 +274,7 @@ export function createTerminalManager(
 	options: TerminalManagerOptions = {},
 ): TerminalManager {
 	const maxTracked = options.maxTracked ?? MAX_TRACKED;
+	const settledRetentionMs = options.settledRetentionMs ?? SETTLED_RETENTION_MS;
 	const retainedPerStream = options.retainedPerStream ?? RETAINED_PER_STREAM;
 	const maxSpillBytesPerStream =
 		options.maxSpillBytesPerStream ?? MAX_SPILL_BYTES_PER_STREAM;
@@ -314,7 +347,12 @@ export function createTerminalManager(
 				broken = true;
 				resumeSource();
 				const current = entry();
-				if (!current) return;
+				if (
+					!current ||
+					current.outputFrozen ||
+					current.snapshot.status !== "running"
+				)
+					return;
 				const buffer =
 					stream === "stdout" ? current.stdoutBuf : current.stderrBuf;
 				buffer.spillPath = undefined;
@@ -336,7 +374,11 @@ export function createTerminalManager(
 					if (streamLimitReached || sessionLimitReached) {
 						capped = true;
 						const current = entry();
-						if (current) {
+						if (
+							current &&
+							!current.outputFrozen &&
+							current.snapshot.status === "running"
+						) {
 							const buffer =
 								stream === "stdout" ? current.stdoutBuf : current.stderrBuf;
 							buffer.spillPath = undefined;
@@ -411,24 +453,49 @@ export function createTerminalManager(
 		entry.stderrBuf.spillPath = undefined;
 	};
 
-	const pruneSettled = () => {
-		if (entries.size <= maxTracked) return;
-		const candidates = [...entries.values()]
-			.filter(
-				(entry) =>
-					entry.snapshot.status !== "running" &&
-					!killInterest.has(entry.snapshot.id),
-			)
-			.sort(
-				(a, b) =>
-					(a.snapshot.settledAt ?? a.snapshot.createdAt) -
-					(b.snapshot.settledAt ?? b.snapshot.createdAt),
-			);
-		for (const entry of candidates) {
-			if (entries.size <= maxTracked) break;
-			entries.delete(entry.snapshot.id);
-			deleteSpills(entry);
-		}
+	const cleanupEntryResources = (entry: Entry) => {
+		if (entry.exitCleanupTimer) clearTimeout(entry.exitCleanupTimer);
+		entry.exitCleanupTimer = undefined;
+		if (entry.retentionTimer) clearTimeout(entry.retentionTimer);
+		entry.retentionTimer = undefined;
+		if (entry.stdoutData) entry.child.stdout?.off("data", entry.stdoutData);
+		if (entry.stderrData) entry.child.stderr?.off("data", entry.stderrData);
+		entry.stdoutData = undefined;
+		entry.stderrData = undefined;
+		entry.child.removeAllListeners();
+		deleteSpills(entry);
+	};
+
+	const removeSettledEntry = (entry: Entry) => {
+		const id = entry.snapshot.id;
+		if (entries.get(id) !== entry || entry.snapshot.status === "running")
+			return;
+		entries.delete(id);
+		cleanupEntryResources(entry);
+		// Global subscribers include every open /ps inspector. Notify after the
+		// removal so id-based selection can reconcile without jumping needlessly.
+		notify(id);
+		idListeners.delete(id);
+	};
+
+	const scheduleRetentionExpiry = (entry: Entry) => {
+		const settledAt = entry.snapshot.settledAt;
+		if (settledAt === undefined) return;
+		const expire = () => {
+			const remaining = settledAt + settledRetentionMs - Date.now();
+			if (remaining > 0) {
+				entry.retentionTimer = setTimeout(expire, remaining);
+				entry.retentionTimer.unref?.();
+				return;
+			}
+			entry.retentionTimer = undefined;
+			removeSettledEntry(entry);
+		};
+		entry.retentionTimer = setTimeout(
+			expire,
+			Math.max(0, settledAt + settledRetentionMs - Date.now()),
+		);
+		entry.retentionTimer.unref?.();
 	};
 
 	const settle = (entry: Entry) => {
@@ -443,19 +510,45 @@ export function createTerminalManager(
 					? "done"
 					: "failed";
 		const killPending = (killInterest.get(snapshot.id) ?? 0) > 0;
+		const detached = detachTerminalSnapshot(snapshot);
+		entry.outputFrozen = true;
+		if (entry.stdoutData) entry.child.stdout?.off("data", entry.stdoutData);
+		if (entry.stderrData) entry.child.stderr?.off("data", entry.stderrData);
+		entry.stdoutData = undefined;
+		entry.stderrData = undefined;
 		entry.settled.resolve();
+		scheduleRetentionExpiry(entry);
 		notify(snapshot.id);
 		try {
-			if (!disposed) onSettled?.(snapshot, killPending);
+			if (!disposed) onSettled?.(detached, killPending);
 		} catch {
 			// A delivery hook cannot undo process settlement.
 		}
-		pruneSettled();
 	};
 
 	const settleAfterFlush = (entry: Entry) => {
 		if (entry.snapshot.status !== "running") return entry.settled.promise;
 		entry.settling ??= flushSpills(entry).then(() => settle(entry));
+		return entry.settling;
+	};
+
+	const forceSettlement = (entry: Entry) => {
+		if (entry.snapshot.status !== "running") return entry.settled.promise;
+		entry.settling ??= (async () => {
+			entry.outputFrozen = true;
+			if (entry.stdoutData) entry.child.stdout?.off("data", entry.stdoutData);
+			if (entry.stderrData) entry.child.stderr?.off("data", entry.stderrData);
+			entry.stdoutData = undefined;
+			entry.stderrData = undefined;
+			entry.child.stdout?.pause();
+			entry.child.stderr?.pause();
+			// A stream that never closed cannot have a complete spill. Keep its
+			// partial retained tail, but never advertise the partial file as full.
+			entry.stdoutBuf.spillPath = undefined;
+			entry.stderrBuf.spillPath = undefined;
+			await flushSpills(entry);
+			settle(entry);
+		})();
 		return entry.settling;
 	};
 
@@ -495,7 +588,7 @@ export function createTerminalManager(
 						"stdio did not close after termination; output may be incomplete",
 					);
 				}
-				await settleAfterFlush(entry);
+				await forceSettlement(entry);
 			}
 		})();
 		return entry.termination;
@@ -512,7 +605,6 @@ export function createTerminalManager(
 			if (count <= 0) killInterest.delete(id);
 			else killInterest.set(id, count);
 		}
-		pruneSettled();
 	};
 
 	const start = async (options: StartOptions) => {
@@ -525,6 +617,11 @@ export function createTerminalManager(
 		if (running >= MAX_RUNNING) {
 			throw new ConcurrencyLimitError(
 				`Max ${MAX_RUNNING} background terminals can run concurrently. Stop one with bg_kill before starting another.`,
+			);
+		}
+		if (entries.size >= maxTracked) {
+			throw new ConcurrencyLimitError(
+				`Max ${maxTracked} background terminals can be retained at once. Wait for a settled terminal's five-minute retention to expire.`,
 			);
 		}
 
@@ -582,52 +679,61 @@ export function createTerminalManager(
 			processErrored: false,
 			exited: false,
 			stdioClosed: false,
-			exitCleanupStarted: false,
+			outputFrozen: false,
 		};
 		entries.set(id, entry);
 		if (process.platform !== "win32" && child.pid) posixGroups.add(child.pid);
 
 		child.stdout?.setEncoding("utf8");
-		child.stdout?.on("data", (chunk: string) => {
+		entry.stdoutData = (chunk: string) => {
+			if (entry.outputFrozen || snapshot.status !== "running") return;
 			if (!stdoutBuf.push(chunk)) child.stdout?.pause();
 			notify(id);
-		});
+		};
+		child.stdout?.on("data", entry.stdoutData);
 		child.stderr?.setEncoding("utf8");
-		child.stderr?.on("data", (chunk: string) => {
+		entry.stderrData = (chunk: string) => {
+			if (entry.outputFrozen || snapshot.status !== "running") return;
 			if (!stderrBuf.push(chunk)) child.stderr?.pause();
 			notify(id);
-		});
+		};
+		child.stderr?.on("data", entry.stderrData);
 		child.once("error", (error) => {
-			entry.processErrored = true;
 			entry.exited = true;
+			if (snapshot.status !== "running") return;
+			entry.processErrored = true;
 			appendError(snapshot, boundedError(error));
 			void settleAfterFlush(entry);
 		});
 		child.once("exit", (code, signal) => {
 			entry.exited = true;
+			if (snapshot.status !== "running") return;
 			snapshot.exitCode = code ?? undefined;
 			snapshot.signal = signal ?? undefined;
-			if (!entry.exitCleanupStarted) {
-				entry.exitCleanupStarted = true;
-				setTimeout(() => {
+			if (!entry.exitCleanupTimer) {
+				entry.exitCleanupTimer = setTimeout(() => {
+					entry.exitCleanupTimer = undefined;
 					if (!entry.stdioClosed && snapshot.status === "running") {
 						void terminateEntry(entry);
 					}
-				}, SETTLE_GRACE_MS).unref();
+				}, SETTLE_GRACE_MS);
+				entry.exitCleanupTimer.unref?.();
 			}
 		});
 		child.once("close", (code, signal) => {
 			entry.exited = true;
 			entry.stdioClosed = true;
-			if (!entry.processErrored) {
-				snapshot.exitCode ??= code ?? undefined;
-				snapshot.signal ??= signal ?? undefined;
+			if (snapshot.status === "running") {
+				if (!entry.processErrored) {
+					snapshot.exitCode ??= code ?? undefined;
+					snapshot.signal ??= signal ?? undefined;
+				}
+				void settleAfterFlush(entry);
 			}
 			// A shell can exit after spawning descendants whose stdio was redirected.
 			// `close` then says nothing about the detached POSIX process group, so reap
 			// it independently. Windows has no equivalent without a Job Object.
 			if (child.pid) void reapPosixGroup(child.pid);
-			void settleAfterFlush(entry);
 		});
 
 		if (disposed) {
@@ -637,24 +743,25 @@ export function createTerminalManager(
 			);
 		}
 		notify(id);
-		return snapshot as TerminalSnapshot;
+		return detachTerminalSnapshot(snapshot);
 	};
 
-	const status = async (id: string) => {
-		const entry = entries.get(id);
-		if (!entry) {
+	const requireEntries = (ids: ReadonlyArray<string>) => {
+		const unique = [...new Set(ids)];
+		const unknown = unique.filter((id) => !entries.has(id));
+		if (unknown.length > 0) {
 			throw new UnknownTerminalError(
-				`Unknown terminal id "${id}". Known: ${[...entries.keys()].join(", ") || "none"}.`,
+				`Unknown terminal id(s): ${unknown.map(sanitizeTerminalLine).join(", ")}. Known: ${[...entries.keys()].map(sanitizeTerminalLine).join(", ") || "none"}.`,
 			);
 		}
-		return entry.snapshot as TerminalSnapshot;
+		return unique.map((id) => entries.get(id) as Entry);
 	};
 
+	const status = async (id: string) =>
+		detachTerminalSnapshot(requireEntries([id])[0].snapshot);
+
 	const kill = async (ids: ReadonlyArray<string>) => {
-		const unique = [...new Set(ids)];
-		const selected = unique
-			.map((id) => entries.get(id))
-			.filter((entry): entry is Entry => entry !== undefined);
+		const selected = requireEntries(ids);
 		const running = selected.filter(
 			(entry) => entry.snapshot.status === "running",
 		);
@@ -691,7 +798,7 @@ export function createTerminalManager(
 		// exists; robust post-root reaping requires Job Objects, which Pi does not
 		// currently provide.
 		await Promise.all([...posixGroups].map((pid) => reapPosixGroup(pid)));
-		for (const entry of all) deleteSpills(entry);
+		for (const entry of all) cleanupEntryResources(entry);
 		entries.clear();
 		posixGroups.clear();
 		idListeners.clear();
@@ -709,8 +816,14 @@ export function createTerminalManager(
 	};
 
 	const view: TerminalReadModel = {
-		list: () => [...entries.values()].map((entry) => entry.snapshot),
-		get: (id) => entries.get(id)?.snapshot,
+		list: () =>
+			[...entries.values()].map((entry) =>
+				detachTerminalSnapshot(entry.snapshot),
+			),
+		get: (id) => {
+			const entry = entries.get(id);
+			return entry ? detachTerminalSnapshot(entry.snapshot) : undefined;
+		},
 		size: () => entries.size,
 		subscribe: (listener) => {
 			listeners.add(listener);

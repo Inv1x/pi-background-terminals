@@ -49,12 +49,13 @@ function renderedCall(tool: ToolDefinition, args: Record<string, unknown>) {
 function renderedResult(
 	tool: ToolDefinition,
 	result: Awaited<ReturnType<ToolDefinition["execute"]>>,
+	expanded = true,
 ) {
 	assert.ok(tool.renderResult);
 	return tool
 		.renderResult(
 			result,
-			{ expanded: true, isPartial: false },
+			{ expanded, isPartial: false },
 			plainTheme,
 			{} as never,
 		)
@@ -145,12 +146,14 @@ test("all extension tool call/result render paths reject title and process-outpu
 	const output = `visible${osc52}\u001b[31m-red\u001b[0m\u2066\u0000\nlast\u001b[12345`;
 
 	try {
+		const startCall = renderedCall(start, {
+			command: `hidden-command${osc52}`,
+			title,
+			working_dir: `/hidden/path${osc52}`,
+		});
+		assert.doesNotMatch(startCall, /hidden-command|hidden\/path/);
 		for (const call of [
-			renderedCall(start, {
-				command: `echo${osc52}`,
-				title,
-				working_dir: `.${osc52}`,
-			}),
+			startCall,
 			renderedCall(status, { id: `bt-1${osc52}` }),
 			renderedCall(list, {}),
 			renderedCall(kill, { ids: [`bt-1${osc52}`] }),
@@ -196,10 +199,15 @@ test("all extension tool call/result render paths reject title and process-outpu
 			}),
 		);
 		assert.ok(statusResult);
+		const modelStatusText = (statusResult.content[0] as { text: string }).text;
+		assert.match(modelStatusText, /visible-red/);
 		const statusText = renderedResult(status, statusResult);
 		assertTerminalLiteral(statusText);
-		assert.match(statusText, /visible-red/);
-		assert.doesNotMatch(statusText, /c2VjcmV0|unterminated/);
+		assert.doesNotMatch(
+			statusText,
+			/visible-red|stdout|stderr|c2VjcmV0|unterminated/,
+		);
+		assert.equal(statusText, renderedResult(status, statusResult, false));
 
 		const listed = await list.execute(
 			"unsafe-list",
@@ -208,7 +216,15 @@ test("all extension tool call/result render paths reject title and process-outpu
 			undefined,
 			harness.ctx,
 		);
-		assertTerminalLiteral(renderedResult(list, listed));
+		const modelListText = (listed.content[0] as { text: string }).text;
+		assert.match(
+			modelListText,
+			new RegExp(process.cwd().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+		);
+		const listedText = renderedResult(list, listed);
+		assertTerminalLiteral(listedText);
+		assert.doesNotMatch(listedText, /stdout|stderr/);
+		assert.equal(listedText, renderedResult(list, listed, false));
 		assertTerminalLiteral(JSON.stringify(listed.details));
 
 		const killed = await kill.execute(
@@ -237,7 +253,9 @@ test("extension boundary delivers completion exactly once across idle/settled ra
 		const first = await start.execute(
 			"call-1",
 			{
-				command: nodeCommand("setTimeout(()=>process.exit(0),80)"),
+				command: nodeCommand(
+					"process.stdout.write('model-only-output');setTimeout(()=>process.exit(0),80)",
+				),
 				title: "busy settlement",
 			},
 			undefined,
@@ -301,6 +319,16 @@ test("extension boundary delivers completion exactly once across idle/settled ra
 		await harness.emit("agent_settled");
 		assert.equal(harness.messages.length, 2);
 		assert.deepEqual(
+			harness.messages.map(
+				({ message }) => (message as { display?: boolean }).display,
+			),
+			[false, false],
+		);
+		assert.match(
+			(harness.messages[0].message as { content: string }).content,
+			/model-only-output/,
+		);
+		assert.deepEqual(
 			harness.messages.map(({ options }) => options),
 			[
 				{ deliverAs: "followUp", triggerTurn: true },
@@ -343,6 +371,19 @@ test("session shutdown through the extension boundary reaps a running child", as
 				}
 			}),
 			`pid ${pid} was reaped during session_shutdown`,
+		);
+		await assert.rejects(
+			start.execute(
+				"stale-session-call",
+				{
+					command: nodeCommand("setInterval(()=>{},1000)"),
+					title: "must not start",
+				},
+				undefined,
+				undefined,
+				harness.ctx,
+			),
+			/session is shutting down/,
 		);
 	} finally {
 		if (!shutdown) await harness.emit("session_shutdown");

@@ -7,6 +7,7 @@ import { ConcurrencyLimitError, type TerminalSnapshot } from "../src/domain.ts";
 import {
 	backgroundProcessEnvironment,
 	createTerminalManager,
+	detachTerminalSnapshot,
 	MAX_RUNNING,
 	PI_SESSION_ENVIRONMENT_KEYS,
 	type TerminalManager,
@@ -45,6 +46,32 @@ function settled(
 		});
 	});
 }
+
+test("detached snapshots read each live output accessor once", () => {
+	let stdoutReads = 0;
+	let stderrReads = 0;
+	const snapshot = {
+		id: "bt-atomic",
+		command: "command",
+		title: "atomic",
+		cwd: process.cwd(),
+		status: "running" as const,
+		createdAt: Date.now(),
+		get stdout() {
+			stdoutReads++;
+			return { text: "out", totalBytes: 3, truncatedBytes: 0 };
+		},
+		get stderr() {
+			stderrReads++;
+			return { text: "err", totalBytes: 3, truncatedBytes: 0 };
+		},
+	};
+	const detached = detachTerminalSnapshot(snapshot);
+	assert.equal(stdoutReads, 1);
+	assert.equal(stderrReads, 1);
+	assert.equal(detached.stdout.text, "out");
+	assert.equal(detached.stderr.text, "err");
+});
 
 async function poll(check: () => boolean, timeoutMs = 5_000) {
 	const deadline = Date.now() + timeoutMs;
@@ -215,7 +242,7 @@ test("aborted kill wait continues termination and retains automatic delivery", {
 		const controller = new AbortController();
 		controller.abort();
 		await assert.rejects(
-			runTool(runtime, operation, { signal: controller.signal }),
+			runTool(operation, { signal: controller.signal }),
 			/aborted/,
 		);
 		releaseDelivery(false);
@@ -265,9 +292,68 @@ test("reaps POSIX descendants with redirected stdio after the root closes", {
 	});
 });
 
-test("bounds aggregate spills and deletes spill files for pruned records", async () => {
+test("settled terminals remain for their full TTL and then notify removal", async () => {
+	const retentionMs = 150;
+	const manager = createTerminalManager({ settledRetentionMs: retentionMs });
+	try {
+		const started = await manager.start({
+			command: nodeCommand("process.stdout.write('retained')"),
+			title: "retention",
+			cwd: process.cwd(),
+		});
+		const done = await settled(manager, started.id);
+		assert.ok(done.settledAt);
+		const notifications: string[] = [];
+		const unsubscribe = manager.view.subscribe(() =>
+			notifications.push(manager.view.get(started.id) ? "present" : "removed"),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 60));
+		assert.ok(manager.view.get(started.id), "TTL cannot be shortened by count");
+		assert.ok(await poll(() => manager.view.get(started.id) === undefined));
+		unsubscribe();
+		assert.ok(Date.now() >= done.settledAt + retentionMs);
+		assert.equal(notifications.at(-1), "removed");
+	} finally {
+		await manager.disposeAll();
+	}
+});
+
+test("tracking safety limit rejects starts instead of shortening retention", async () => {
 	const manager = createTerminalManager({
 		maxTracked: 1,
+		settledRetentionMs: 100,
+	});
+	try {
+		const first = await manager.start({
+			command: nodeCommand("process.exit(0)"),
+			title: "first",
+			cwd: process.cwd(),
+		});
+		await settled(manager, first.id);
+		await assert.rejects(
+			manager.start({
+				command: nodeCommand("process.exit(0)"),
+				title: "blocked",
+				cwd: process.cwd(),
+			}),
+			/five-minute retention/,
+		);
+		assert.ok(manager.view.get(first.id));
+		assert.ok(await poll(() => manager.view.get(first.id) === undefined));
+		const next = await manager.start({
+			command: nodeCommand("process.exit(0)"),
+			title: "next",
+			cwd: process.cwd(),
+		});
+		assert.equal(next.id, "bt-2");
+	} finally {
+		await manager.disposeAll();
+	}
+});
+
+test("bounds aggregate spills and deletes spill files after exact retention", async () => {
+	const manager = createTerminalManager({
+		settledRetentionMs: 80,
 		retainedPerStream: 4,
 		maxSpillBytesPerStream: 100,
 		maxSpillBytesPerSession: 10,
@@ -291,17 +377,37 @@ test("bounds aggregate spills and deletes spill files for pruned records", async
 		assert.ok(spillPath && fs.existsSync(spillPath));
 		assert.ok(fs.statSync(spillPath).size <= 10);
 
-		const second = await manager.start({
-			command: nodeCommand("process.stdout.write('next')"),
-			title: "prune",
-			cwd: process.cwd(),
-		});
-		await settled(manager, second.id);
-		assert.equal(manager.view.get(first.id), undefined);
+		let expiryNotifications = 0;
+		const unsubscribe = manager.view.subscribe(() => expiryNotifications++);
+		assert.ok(
+			manager.view.get(first.id),
+			"settled terminal remains inspectable",
+		);
+		assert.ok(
+			await poll(() => manager.view.get(first.id) === undefined),
+			"settled terminal expires from settledAt",
+		);
+		unsubscribe();
+		assert.ok(expiryNotifications > 0, "open inspectors are notified");
 		assert.equal(fs.existsSync(spillPath), false);
 	} finally {
 		await manager.disposeAll();
 	}
+});
+
+test("status and kill share sanitized unknown-id validation", async () => {
+	await withManager(async (manager) => {
+		for (const operation of [
+			() => manager.status("missing\u001b[31m"),
+			() => manager.kill(["missing\u001b[31m"]),
+		]) {
+			await assert.rejects(operation(), (error: Error) => {
+				assert.match(error.message, /Unknown terminal id\(s\): missing/);
+				assert.doesNotMatch(error.message, /\u001b/);
+				return true;
+			});
+		}
+	});
 });
 
 test("enforces eight running terminals and shutdown reaps all of them", async () => {

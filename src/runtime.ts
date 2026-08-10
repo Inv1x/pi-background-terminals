@@ -20,7 +20,6 @@ export function createTerminalRuntime(): TerminalRuntime {
  * continues its SIGTERM/SIGKILL escalation after the tool wait is aborted).
  */
 export async function runTool<A>(
-	_runtime: TerminalRuntime,
 	operation: Promise<A>,
 	options: { signal?: AbortSignal; interruptMessage?: string } = {},
 ) {

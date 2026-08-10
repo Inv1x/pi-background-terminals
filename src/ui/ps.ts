@@ -12,9 +12,9 @@ import type {
 import { formatSize } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import {
+	matchesKey,
 	truncateToWidth,
 	visibleWidth,
-	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { formatElapsed, formatExit, type TerminalSnapshot } from "../domain.ts";
 import type { TerminalReadModel } from "../manager.ts";
@@ -360,7 +360,7 @@ class TerminalInspector implements Component {
 		if (
 			this.keybindings.matches(data, "app.interrupt") ||
 			this.keybindings.matches(data, "tui.select.cancel") ||
-			data === "q"
+			matchesKey(data, "q")
 		) {
 			this.close();
 			return;
@@ -369,10 +369,11 @@ class TerminalInspector implements Component {
 			this.select(this.selection.index - 1, terminals);
 		else if (this.keybindings.matches(data, "tui.select.down"))
 			this.select(this.selection.index + 1, terminals);
-		else if (data === "g") this.select(0, terminals);
-		else if (data === "G") this.select(terminals.length - 1, terminals);
-		else if (data === "k") this.scrollOffset += 1;
-		else if (data === "j")
+		else if (matchesKey(data, "g")) this.select(0, terminals);
+		else if (matchesKey(data, "shift+g"))
+			this.select(terminals.length - 1, terminals);
+		else if (matchesKey(data, "k")) this.scrollOffset += 1;
+		else if (matchesKey(data, "j"))
 			this.scrollOffset = Math.max(0, this.scrollOffset - 1);
 		else if (this.keybindings.matches(data, "tui.editor.pageUp"))
 			this.scrollOffset += this.outputViewportRows;
@@ -381,13 +382,13 @@ class TerminalInspector implements Component {
 				0,
 				this.scrollOffset - this.outputViewportRows,
 			);
-		else if (data === "t") {
+		else if (matchesKey(data, "t")) {
 			this.stream = this.stream === "stdout" ? "stderr" : "stdout";
 			this.resetOutput();
-		} else if (data === "x") {
+		} else if (matchesKey(data, "x")) {
 			const snap = this.selected(terminals);
 			if (snap?.status === "running") this.view.requestKill(snap.id);
-		} else if (data !== "r") return;
+		} else if (!matchesKey(data, "r")) return;
 		this.tui.requestRender();
 	}
 
@@ -615,11 +616,7 @@ class TerminalInspector implements Component {
 		if (visible.length === 0)
 			prefix.push(this.theme.fg("dim", `(no ${this.stream} yet)`));
 		else
-			prefix.push(
-				...visible.flatMap((line) =>
-					wrapTextWithAnsi(this.theme.fg("toolOutput", line), width),
-				),
-			);
+			prefix.push(...visible.map((line) => this.theme.fg("toolOutput", line)));
 		return prefix.slice(0, height);
 	}
 

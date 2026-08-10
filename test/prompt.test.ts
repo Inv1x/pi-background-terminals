@@ -32,7 +32,10 @@ function snapshot(overrides: Partial<TerminalSnapshot> = {}): TerminalSnapshot {
 test("start prompt documents shell, no-stdin, limits, and session lifetime", () => {
 	assert.match(BG_START_TOOL_DESCRIPTION, /NO stdin/);
 	assert.match(BG_START_TOOL_DESCRIPTION, /session-scoped/);
+	assert.match(BG_START_TOOL_DESCRIPTION, /five minutes/);
+	assert.match(BG_START_TOOL_DESCRIPTION, /transcript-quiet/);
 	assert.match(BG_START_TOOL_DESCRIPTION, /Max 8/);
+	assert.match(BG_START_TOOL_DESCRIPTION, /32 running-or-retained/);
 	assert.match(BG_START_PARAMETER_DESCRIPTIONS.command, /sh -c on POSIX/);
 	assert.match(BG_START_PARAMETER_DESCRIPTIONS.command, /cmd\.exe/);
 });
