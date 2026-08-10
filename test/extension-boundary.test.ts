@@ -10,7 +10,9 @@ import backgroundTerminals from "../src/index.ts";
 
 function nodeCommand(script: string) {
 	const encoded = Buffer.from(script).toString("base64");
-	return `"${process.execPath.replaceAll('"', '\\"')}" -e "eval(Buffer.from('${encoded}','base64').toString())"`;
+	// setup-node puts a shell-safe `node` shim on PATH on every CI platform;
+	// avoiding an absolute Program Files path also avoids cmd.exe /s quote folding.
+	return `node -e "eval(Buffer.from('${encoded}','base64').toString())"`;
 }
 
 async function poll(
