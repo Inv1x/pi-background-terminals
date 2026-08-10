@@ -1,0 +1,2 @@
+# Keep formatter inputs stable on Windows runners.
+* text=auto eol=lf
