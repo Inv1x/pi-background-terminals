@@ -6,13 +6,18 @@ import test from "node:test";
 import { ConcurrencyLimitError, type TerminalSnapshot } from "../src/domain.ts";
 import {
 	backgroundProcessEnvironment,
+	COMPLETION_RETAINED_PER_STREAM,
 	createTerminalManager,
 	detachTerminalSnapshot,
 	MAX_RUNNING,
 	PI_SESSION_ENVIRONMENT_KEYS,
 	type TerminalManager,
 } from "../src/manager.ts";
-import { buildStatusResult } from "../src/prompt.ts";
+import { OutputBuffer } from "../src/output.ts";
+import {
+	buildStatusResult,
+	buildTerminalResultMessage,
+} from "../src/prompt.ts";
 import { createDeferredResultDelivery } from "../src/result-delivery.ts";
 import { createTerminalRuntime, runTool } from "../src/runtime.ts";
 
@@ -81,6 +86,42 @@ async function poll(check: () => boolean, timeoutMs = 5_000) {
 	}
 	return true;
 }
+
+test("lifecycle running counts do not materialize output on chunk updates", async () => {
+	const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bt-count-test-"));
+	const marker = path.join(directory, "output-written");
+	const manager = createTerminalManager();
+	const originalView = OutputBuffer.prototype.view;
+	let outputReads = 0;
+	OutputBuffer.prototype.view = function countedView() {
+		outputReads++;
+		return originalView.call(this);
+	};
+	const counts: number[] = [];
+	const unsubscribe = manager.view.subscribeLifecycle(() =>
+		counts.push(manager.view.runningCount()),
+	);
+	try {
+		await manager.start({
+			command: nodeCommand(
+				`for(let i=0;i<20;i++)process.stdout.write(String(i));require('fs').writeFileSync(${JSON.stringify(marker)},'done');setInterval(()=>{},1000)`,
+			),
+			title: "chunky",
+			cwd: process.cwd(),
+		});
+		const readsAfterStartResult = outputReads;
+		assert.equal(readsAfterStartResult, 2, "only the returned start snapshot");
+		assert.ok(await poll(() => fs.existsSync(marker)));
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(outputReads, readsAfterStartResult);
+		assert.deepEqual(counts, [1]);
+	} finally {
+		unsubscribe();
+		OutputBuffer.prototype.view = originalView;
+		await manager.disposeAll();
+		fs.rmSync(directory, { recursive: true, force: true });
+	}
+});
 
 test("background children omit Pi session metadata but inherit process markers", async () => {
 	const environment: NodeJS.ProcessEnv = {
@@ -290,6 +331,51 @@ test("reaps POSIX descendants with redirected stdio after the root closes", {
 			fs.rmSync(directory, { recursive: true, force: true });
 		}
 	});
+});
+
+test("prebuilt completion stays bounded and path-free past retention expiry", async () => {
+	const manager = createTerminalManager({
+		settledRetentionMs: 80,
+		retainedPerStream: 4,
+	});
+	const delivery = createDeferredResultDelivery<{
+		id: string;
+		content: string;
+	}>();
+	manager.view.setOnSettled((snapshot) => {
+		assert.ok(
+			Buffer.byteLength(snapshot.stdout.text) <= COMPLETION_RETAINED_PER_STREAM,
+		);
+		assert.equal(snapshot.stdout.spillPath, undefined);
+		delivery.defer({
+			id: snapshot.id,
+			content: buildTerminalResultMessage(snapshot),
+		});
+	});
+	try {
+		const started = await manager.start({
+			command: nodeCommand("process.stdout.write('x'.repeat(100000))"),
+			title: "busy beyond five minutes",
+			cwd: process.cwd(),
+		});
+		const done = await settled(manager, started.id);
+		const spillPath = done.stdout.spillPath;
+		assert.ok(spillPath && fs.existsSync(spillPath));
+		assert.ok(await poll(() => manager.view.get(started.id) === undefined));
+		assert.equal(fs.existsSync(spillPath), false);
+
+		// The short TTL override represents production's exact five-minute expiry
+		// while a busy turn (or retry) delays consumption of the prebuilt payload.
+		const [completion] = delivery.drain();
+		assert.ok(completion);
+		assert.ok(completion.content.length < COMPLETION_RETAINED_PER_STREAM);
+		assert.doesNotMatch(
+			completion.content,
+			/Full log:|pi-background-terminals|\/ps/,
+		);
+	} finally {
+		await manager.disposeAll();
+	}
 });
 
 test("settled terminals remain for their full TTL and then notify removal", async () => {

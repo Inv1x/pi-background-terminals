@@ -19,6 +19,8 @@ export const SETTLED_RETENTION_MS = 5 * 60 * 1000;
 export const RETAINED_PER_STREAM = 2 * 1024 * 1024;
 export const MAX_SPILL_BYTES_PER_STREAM = 256 * 1024 * 1024;
 export const MAX_SPILL_BYTES_PER_SESSION = 512 * 1024 * 1024;
+/** Per-stream capture passed to the synchronous completion formatter. */
+export const COMPLETION_RETAINED_PER_STREAM = 32 * 1024;
 const FORCE_KILL_AFTER_MS = 2_000;
 const FINAL_KILL_WAIT_MS = 500;
 const SETTLE_GRACE_MS = 1_000;
@@ -101,7 +103,11 @@ export interface TerminalReadModel {
 	list(): ReadonlyArray<TerminalSnapshot>;
 	get(id: string): TerminalSnapshot | undefined;
 	size(): number;
+	runningCount(): number;
+	/** Output and lifecycle changes, for inspectors. */
 	subscribe(listener: () => void): () => void;
+	/** Start/settle/removal changes only; never fires for output chunks. */
+	subscribeLifecycle(listener: () => void): () => void;
 	subscribeTo(id: string, listener: () => void): () => void;
 	requestKill(id: string): void;
 	setOnSettled(
@@ -172,6 +178,25 @@ export function detachTerminalSnapshot(
 		errorText: snapshot.errorText,
 		stdout: { ...stdout },
 		stderr: { ...stderr },
+	};
+}
+
+function completionSnapshot(entry: Entry): TerminalSnapshot {
+	const snapshot = entry.snapshot;
+	return {
+		id: snapshot.id,
+		command: snapshot.command,
+		title: snapshot.title,
+		cwd: snapshot.cwd,
+		pid: snapshot.pid,
+		status: snapshot.status,
+		createdAt: snapshot.createdAt,
+		settledAt: snapshot.settledAt,
+		exitCode: snapshot.exitCode,
+		signal: snapshot.signal,
+		errorText: snapshot.errorText,
+		stdout: entry.stdoutBuf.tail(COMPLETION_RETAINED_PER_STREAM),
+		stderr: entry.stderrBuf.tail(COMPLETION_RETAINED_PER_STREAM),
 	};
 }
 
@@ -283,8 +308,10 @@ export function createTerminalManager(
 	const entries = new Map<string, Entry>();
 	const killInterest = new Map<string, number>();
 	const listeners = new Set<() => void>();
+	const lifecycleListeners = new Set<() => void>();
 	const idListeners = new Map<string, Set<() => void>>();
 	let counter = 0;
+	let runningCount = 0;
 	let disposed = false;
 	let spillDir: string | undefined | null;
 	let spillBytes = 0;
@@ -310,6 +337,17 @@ export function createTerminalManager(
 				}
 			}
 		}
+	};
+
+	const notifyLifecycle = (id?: string) => {
+		for (const listener of [...lifecycleListeners]) {
+			try {
+				listener();
+			} catch {
+				// UI listeners must not affect process lifecycle.
+			}
+		}
+		notify(id);
 	};
 
 	const resolveSpillDir = () => {
@@ -474,7 +512,7 @@ export function createTerminalManager(
 		cleanupEntryResources(entry);
 		// Global subscribers include every open /ps inspector. Notify after the
 		// removal so id-based selection can reconcile without jumping needlessly.
-		notify(id);
+		notifyLifecycle(id);
 		idListeners.delete(id);
 	};
 
@@ -510,17 +548,18 @@ export function createTerminalManager(
 					? "done"
 					: "failed";
 		const killPending = (killInterest.get(snapshot.id) ?? 0) > 0;
-		const detached = detachTerminalSnapshot(snapshot);
 		entry.outputFrozen = true;
 		if (entry.stdoutData) entry.child.stdout?.off("data", entry.stdoutData);
 		if (entry.stderrData) entry.child.stderr?.off("data", entry.stderrData);
 		entry.stdoutData = undefined;
 		entry.stderrData = undefined;
+		const completion = completionSnapshot(entry);
+		runningCount = Math.max(0, runningCount - 1);
 		entry.settled.resolve();
 		scheduleRetentionExpiry(entry);
-		notify(snapshot.id);
+		notifyLifecycle(snapshot.id);
 		try {
-			if (!disposed) onSettled?.(detached, killPending);
+			if (!disposed) onSettled?.(completion, killPending);
 		} catch {
 			// A delivery hook cannot undo process settlement.
 		}
@@ -611,10 +650,7 @@ export function createTerminalManager(
 		if (disposed) {
 			throw new SpawnError("Background terminal manager is shutting down.");
 		}
-		const running = [...entries.values()].filter(
-			(entry) => entry.snapshot.status === "running",
-		).length;
-		if (running >= MAX_RUNNING) {
+		if (runningCount >= MAX_RUNNING) {
 			throw new ConcurrencyLimitError(
 				`Max ${MAX_RUNNING} background terminals can run concurrently. Stop one with bg_kill before starting another.`,
 			);
@@ -682,6 +718,7 @@ export function createTerminalManager(
 			outputFrozen: false,
 		};
 		entries.set(id, entry);
+		runningCount++;
 		if (process.platform !== "win32" && child.pid) posixGroups.add(child.pid);
 
 		child.stdout?.setEncoding("utf8");
@@ -742,7 +779,7 @@ export function createTerminalManager(
 				"Background terminal manager shut down while starting.",
 			);
 		}
-		notify(id);
+		notifyLifecycle(id);
 		return detachTerminalSnapshot(snapshot);
 	};
 
@@ -800,6 +837,7 @@ export function createTerminalManager(
 		await Promise.all([...posixGroups].map((pid) => reapPosixGroup(pid)));
 		for (const entry of all) cleanupEntryResources(entry);
 		entries.clear();
+		runningCount = 0;
 		posixGroups.clear();
 		idListeners.clear();
 		const dir = spillDir;
@@ -811,8 +849,9 @@ export function createTerminalManager(
 				// Private temp output is best-effort cleanup.
 			}
 		}
-		notify();
+		notifyLifecycle();
 		listeners.clear();
+		lifecycleListeners.clear();
 	};
 
 	const view: TerminalReadModel = {
@@ -825,9 +864,14 @@ export function createTerminalManager(
 			return entry ? detachTerminalSnapshot(entry.snapshot) : undefined;
 		},
 		size: () => entries.size,
+		runningCount: () => runningCount,
 		subscribe: (listener) => {
 			listeners.add(listener);
 			return () => listeners.delete(listener);
+		},
+		subscribeLifecycle: (listener) => {
+			lifecycleListeners.add(listener);
+			return () => lifecycleListeners.delete(listener);
 		},
 		subscribeTo: (id, listener) => {
 			let set = idListeners.get(id);

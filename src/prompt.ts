@@ -94,6 +94,7 @@ function outputSection(
 	view: TerminalSnapshot["stdout"],
 	maxBytes: number,
 	maxLines: number,
+	includeDetailedPointer = true,
 ) {
 	if (view.totalBytes === 0) return `${label}: (empty)`;
 	// Sanitize the complete retained tail before truncating it. Truncating first
@@ -106,11 +107,13 @@ function outputSection(
 	let text = `${label}:\n${truncation.content}`;
 	const shownBytes = truncation.outputBytes;
 	if (truncation.truncated || view.truncatedBytes > 0) {
-		const where = view.spillPath
-			? `Full log: ${sanitizeTerminalLine(view.spillPath)}`
-			: view.truncatedBytes > 0
-				? "Earlier output is unavailable; /ps also shows only the retained tail"
-				: "More retained output is available in /ps";
+		const where = includeDetailedPointer
+			? view.spillPath
+				? `Full log: ${sanitizeTerminalLine(view.spillPath)}`
+				: view.truncatedBytes > 0
+					? "Earlier output is unavailable; /ps also shows only the retained tail"
+					: "More retained output is available in /ps"
+			: "Earlier output was omitted from this completion message";
 		text += `\n[${label} truncated: showing last ${formatSize(shownBytes)} of ${formatSize(view.totalBytes)}. ${where}]`;
 	}
 	return text;
@@ -134,9 +137,9 @@ export function buildTerminalResultMessage(snap: TerminalSnapshot) {
 	let text = `Background terminal ${sanitizeTerminalLine(snap.id)} "${sanitizeTerminalLine(snap.title)}" ${how} after ${formatElapsed(snap)}.`;
 	if (snap.errorText)
 		text += `\nError: ${sanitizeTerminalText(snap.errorText)}`;
-	text += `\n\n${outputSection("stdout", snap.stdout, RESULT_STDOUT_MAX, RESULT_STDOUT_MAX_LINES)}`;
+	text += `\n\n${outputSection("stdout", snap.stdout, RESULT_STDOUT_MAX, RESULT_STDOUT_MAX_LINES, false)}`;
 	if (snap.stderr.totalBytes > 0) {
-		text += `\n\n${outputSection("stderr", snap.stderr, RESULT_STDERR_MAX, RESULT_STDERR_MAX_LINES)}`;
+		text += `\n\n${outputSection("stderr", snap.stderr, RESULT_STDERR_MAX, RESULT_STDERR_MAX_LINES, false)}`;
 	}
 	return text;
 }

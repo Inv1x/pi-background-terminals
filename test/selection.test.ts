@@ -116,6 +116,8 @@ function inspectorHarness(
 		list: () => current,
 		get: (id) => current.find((snap) => snap.id === id),
 		size: () => current.length,
+		runningCount: () =>
+			current.filter((snapshot) => snapshot.status === "running").length,
 		subscribe: (listener) => {
 			subscriptions++;
 			listeners.add(listener);
@@ -124,6 +126,7 @@ function inspectorHarness(
 				listeners.delete(listener);
 			};
 		},
+		subscribeLifecycle: () => () => {},
 		subscribeTo: () => () => {},
 		requestKill: (id) => kills.push(id),
 		setOnSettled: () => {},

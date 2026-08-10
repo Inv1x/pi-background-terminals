@@ -73,6 +73,18 @@ export {
 
 const STATUS_KEY = "background-terminals";
 
+interface DeferredTerminalResult {
+	readonly id: string;
+	readonly content: string;
+	readonly details: {
+		readonly id: string;
+		readonly title: string;
+		readonly status: TerminalSnapshot["status"];
+		readonly exitCode?: number;
+		readonly signal?: string;
+	};
+}
+
 function stringValue(value: unknown): string {
 	return typeof value === "string" ? value : "";
 }
@@ -182,12 +194,11 @@ export default function (pi: ExtensionAPI) {
 	let sessionGeneration = 0;
 	let managerGeneration = -1;
 	let shuttingDown = false;
-	let sessionContext: ExtensionContext | undefined;
 	let sessionAbort: AbortController | undefined;
 	let ui: ExtensionUIContext | undefined;
 	let unsubStatus: (() => void) | undefined;
 	let unsubActivation: (() => void) | undefined;
-	const resultDelivery = createDeferredResultDelivery<TerminalSnapshot>();
+	const resultDelivery = createDeferredResultDelivery<DeferredTerminalResult>();
 
 	const getRuntime = () => (runtime ??= createTerminalRuntime());
 
@@ -202,22 +213,21 @@ export default function (pi: ExtensionAPI) {
 			wiredManager = manager;
 			managerGeneration = sessionGeneration;
 			manager.view.setOnSettled(onSettled);
-			unsubStatus = manager.view.subscribe(() => updateStatus(manager));
+			unsubStatus = manager.view.subscribeLifecycle(() =>
+				updateStatus(manager),
+			);
 			updateStatus(manager);
 		}
 		return manager;
 	};
 
-	/** One-line footer status, only while ≥1 terminal is running. Called on
-	 * every manager notification (including per-output-chunk), so it updates
-	 * Pi's status registry only when the visible running count changes. */
+	/** One-line footer status, only while ≥1 terminal is running. Lifecycle
+	 * notifications exclude output chunks, and runningCount never reads output. */
 	let statusRunning = 0;
 	const updateStatus = (manager: TerminalManager) => {
 		if (!ui) return;
 		try {
-			const running = manager.view
-				.list()
-				.filter((snap) => snap.status === "running").length;
+			const running = manager.view.runningCount();
 			if (running === statusRunning) return;
 			statusRunning = running;
 			if (running === 0) {
@@ -234,20 +244,14 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	const deliverResult = (snap: TerminalSnapshot) => {
+	const deliverResult = (result: DeferredTerminalResult) => {
 		try {
 			pi.sendMessage(
 				{
 					customType: "background-terminal-result",
-					content: buildTerminalResultMessage(snap),
+					content: result.content,
 					display: false,
-					details: {
-						id: sanitizeTerminalLine(snap.id),
-						title: sanitizeTerminalLine(snap.title),
-						status: snap.status,
-						exitCode: snap.exitCode,
-						signal: snap.signal ? sanitizeTerminalLine(snap.signal) : undefined,
-					},
+					details: result.details,
 				},
 				// followUp: queued until the agent has no more tool calls — never
 				// interrupts a mid-turn stream. triggerTurn: wakes the model
@@ -257,27 +261,38 @@ export default function (pi: ExtensionAPI) {
 			);
 			return true;
 		} catch (error) {
-			// Session may be shutting down, but retain the snapshot so any later
-			// agent-settled flush can retry instead of silently dropping it.
+			// Session may be shutting down, but retain the bounded payload so any
+			// later agent-settled flush can retry instead of silently dropping it.
 			console.error("background-terminals: failed to deliver result", error);
 			return false;
 		}
 	};
 
 	const flushResults = () => {
-		for (const snap of resultDelivery.drain()) {
-			if (!deliverResult(snap)) resultDelivery.defer(snap);
+		for (const result of resultDelivery.drain()) {
+			if (!deliverResult(result)) resultDelivery.defer(result);
 		}
 	};
 
 	const onSettled = (snap: TerminalSnapshot, killPending: boolean) => {
-		// Always retain the automatic delivery until the bg_kill tool has
-		// successfully returned. An aborted tool wait must not consume a process
-		// settlement even though its termination continues in the background.
-		resultDelivery.defer(snap);
-		// Held kill results are skipped by drains while the tool still has the
-		// opportunity to return this exact settlement itself.
-		if (!killPending && sessionContext?.isIdle()) flushResults();
+		// Prebuild and retain only the bounded model payload. The manager supplies
+		// bounded, spill-free output tails here rather than its multi-megabyte UI
+		// snapshot, so a kill reservation or failed send cannot pin full output.
+		resultDelivery.defer({
+			id: snap.id,
+			content: buildTerminalResultMessage(snap),
+			details: {
+				id: sanitizeTerminalLine(snap.id),
+				title: sanitizeTerminalLine(snap.title),
+				status: snap.status,
+				exitCode: snap.exitCode,
+				signal: snap.signal ? sanitizeTerminalLine(snap.signal) : undefined,
+			},
+		});
+		// Pi queues followUp messages behind a busy turn. Queue immediately when
+		// no bg_kill call has reserved this settlement; held kill results remain
+		// pending until the tool either consumes or releases them.
+		if (!killPending) flushResults();
 	};
 
 	const openPs = async (ctx: ExtensionContext) => {
@@ -314,7 +329,6 @@ export default function (pi: ExtensionAPI) {
 		pi.events.emit(UI_CUSTOMIZATION_STATUS_OPTIONS_EVENT, statusOptions);
 		sessionAbort?.abort();
 		sessionAbort = new AbortController();
-		sessionContext = ctx;
 		if (ctx.hasUI) ui = ctx.ui;
 		unsubActivation?.();
 		unsubActivation = pi.events.on(
@@ -336,9 +350,8 @@ export default function (pi: ExtensionAPI) {
 		);
 	});
 
-	// Drain deferred results when the agent settles: together with the
-	// isIdle() fast path above and the Map-keyed delivery (drain clears),
-	// double delivery is structurally impossible — whoever drains first wins.
+	// Retry any deferred sends when the agent settles. Map-keyed delivery and
+	// drain-before-send make double delivery structurally impossible.
 	pi.on("agent_settled", flushResults);
 
 	// /new, /resume, /fork, /reload, and quit all emit session_shutdown for
@@ -349,7 +362,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		shuttingDown = true;
 		sessionGeneration++;
-		sessionContext = undefined;
 		sessionAbort?.abort();
 		sessionAbort = undefined;
 		resultDelivery.clear();

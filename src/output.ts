@@ -72,6 +72,40 @@ export class OutputBuffer {
 		return spillAccepted;
 	}
 
+	/** Build a bounded tail without joining the complete retained buffer. */
+	tail(maxBytes: number): OutputView {
+		let remaining = Math.max(0, maxBytes);
+		const tail: string[] = [];
+		for (
+			let index = this.chunks.length - 1;
+			index >= 0 && remaining > 0;
+			index--
+		) {
+			const chunk = this.chunks[index];
+			const bytes = Buffer.byteLength(chunk, "utf8");
+			if (bytes <= remaining) {
+				tail.push(chunk);
+				remaining -= bytes;
+				continue;
+			}
+			const raw = Buffer.from(chunk, "utf8");
+			let start = raw.length - remaining;
+			while (start < raw.length && (raw[start] & 0xc0) === 0x80) start++;
+			tail.push(raw.subarray(start).toString("utf8"));
+			break;
+		}
+		const text = tail.reverse().join("");
+		const shownBytes = Buffer.byteLength(text, "utf8");
+		return {
+			text,
+			totalBytes: this.totalBytes,
+			truncatedBytes: Math.max(
+				this.truncatedBytes,
+				this.totalBytes - shownBytes,
+			),
+		};
+	}
+
 	view(): OutputView {
 		this.cachedText ??= this.chunks.join("");
 		return {

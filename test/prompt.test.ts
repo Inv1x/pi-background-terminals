@@ -40,7 +40,7 @@ test("start prompt documents shell, no-stdin, limits, and session lifetime", () 
 	assert.match(BG_START_PARAMETER_DESCRIPTIONS.command, /cmd\.exe/);
 });
 
-test("status and completion expose bounded tails and spill pointers", () => {
+test("status exposes a live spill pointer but completion never retains it", () => {
 	const lines = Array.from({ length: 500 }, (_, index) => `line-${index}`).join(
 		"\n",
 	);
@@ -59,6 +59,8 @@ test("status and completion expose bounded tails and spill pointers", () => {
 	assert.match(status, /Full log: \/tmp\/full\.log/);
 	assert.match(result, /exited \(exit 2\)/);
 	assert.match(result, /line-499/);
+	assert.doesNotMatch(result, /\/tmp\/full\.log|Full log:|\/ps/);
+	assert.match(result, /omitted from this completion message/);
 	assert.ok(result.length < status.length);
 });
 

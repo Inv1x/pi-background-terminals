@@ -236,6 +236,12 @@ test("all extension tool call/result render paths reject title and process-outpu
 		);
 		assertTerminalLiteral(renderedResult(kill, killed));
 		assertTerminalLiteral(JSON.stringify(killed.details));
+		await harness.emit("agent_settled");
+		assert.equal(
+			harness.messages.length,
+			0,
+			"a successful kill consumes its reserved automatic completion",
+		);
 	} finally {
 		await harness.emit("session_shutdown");
 	}
@@ -254,7 +260,7 @@ test("extension boundary delivers completion exactly once across idle/settled ra
 			"call-1",
 			{
 				command: nodeCommand(
-					"process.stdout.write('model-only-output');setTimeout(()=>process.exit(0),80)",
+					"process.stdout.write('x'.repeat(100000)+'model-only-output');setTimeout(()=>process.exit(0),80)",
 				),
 				title: "busy settlement",
 			},
@@ -295,7 +301,17 @@ test("extension boundary delivers completion exactly once across idle/settled ra
 				);
 			}),
 		);
-		assert.equal(harness.messages.length, 0);
+		// A busy turn is not a reason to retain output: Pi accepts and queues the
+		// hidden follow-up immediately, even if agent_settled is much later.
+		assert.ok(await poll(() => harness.messages.length === 1));
+		assert.ok(
+			(harness.messages[0].message as { content: string }).content.length <
+				50_000,
+		);
+		assert.doesNotMatch(
+			(harness.messages[0].message as { content: string }).content,
+			/Full log:|pi-background-terminals|\/ps/,
+		);
 		harness.setIdle(true);
 		await harness.emit("agent_settled");
 		await harness.emit("agent_settled");

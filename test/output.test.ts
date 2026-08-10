@@ -26,6 +26,18 @@ test("oversized UTF-8 chunks retain a valid tail and spill the complete input", 
 	assert.deepEqual(spilled, ["ééééé"]);
 });
 
+test("builds a bounded UTF-8 tail without advertising the spill", () => {
+	const output = new OutputBuffer(64);
+	output.spillPath = "/tmp/full.log";
+	output.push("prefix-ééé-tail");
+	const tail = output.tail(9);
+	assert.equal(tail.text, "éé-tail");
+	assert.equal(tail.totalBytes, 18);
+	assert.equal(tail.truncatedBytes, 9);
+	assert.equal(tail.spillPath, undefined);
+	assert.ok(!tail.text.includes("�"));
+});
+
 test("reports spill backpressure without losing retained output", () => {
 	const output = new OutputBuffer(32, () => false);
 	assert.equal(output.push("queued"), false);
