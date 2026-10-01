@@ -1,8 +1,9 @@
 /**
  * One-shot delivery map: a prebuilt bounded result remains here only until it
- * is queued as a follow-up or consumed by a tool call (bg_kill / bg_status)
- * that returns the settlement itself. Keying by id makes double delivery
- * structurally impossible — whoever drains first wins.
+ * is committed at a Pi boundary, queued as an idle follow-up, or consumed by
+ * a tool call (bg_kill / bg_status) that returns the settlement itself.
+ * Boundary proposals use peek() and acknowledge only persisted entries;
+ * uncommitted or rejected drafts remain eligible for the next boundary.
  */
 export function createDeferredResultDelivery<T extends { id: string }>() {
 	const pending = new Map<string, T>();
@@ -30,6 +31,10 @@ export function createDeferredResultDelivery<T extends { id: string }>() {
 		},
 		consume(ids: Iterable<string>) {
 			for (const id of ids) pending.delete(id);
+		},
+		/** Inspect eligible payloads without acknowledging uncommitted drafts. */
+		peek() {
+			return [...pending.values()].filter((result) => !holds.has(result.id));
 		},
 		drain() {
 			const results: T[] = [];

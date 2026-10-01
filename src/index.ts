@@ -16,13 +16,16 @@
  * this file is the Pi API boundary. Node stream plumbing is callback-driven.
  */
 
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
+	AgentBeforeSettleEvent,
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionUIContext,
 	Theme,
+	TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
@@ -77,6 +80,8 @@ interface DeferredTerminalResult {
 	readonly id: string;
 	readonly content: string;
 	readonly details: {
+		/** Terminal ids restart on reload; delivery ids never do. */
+		readonly deliveryId: string;
 		readonly id: string;
 		readonly title: string;
 		readonly status: TerminalSnapshot["status"];
@@ -194,6 +199,8 @@ export default function (pi: ExtensionAPI) {
 	let sessionGeneration = 0;
 	let managerGeneration = -1;
 	let shuttingDown = false;
+	let currentContext: ExtensionContext | undefined;
+	let allowIdleWakeup = true;
 	let sessionAbort: AbortController | undefined;
 	let ui: ExtensionUIContext | undefined;
 	let unsubStatus: (() => void) | undefined;
@@ -268,7 +275,35 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
+	const acknowledgePersisted = (ctx = currentContext) => {
+		if (!ctx) return;
+		const delivered = ctx.sessionManager.getBranch().flatMap((entry) => {
+			if (
+				entry.type !== "custom_message" ||
+				entry.customType !== "background-terminal-result"
+			)
+				return [];
+			const id = (entry.details as { deliveryId?: unknown } | undefined)
+				?.deliveryId;
+			return typeof id === "string" ? [id] : [];
+		});
+		const committed = new Set(delivered);
+		resultDelivery.consume(
+			resultDelivery
+				.peek()
+				.filter((result) => committed.has(result.details.deliveryId))
+				.map((result) => result.id),
+		);
+	};
+
 	const flushResults = () => {
+		if (
+			shuttingDown ||
+			!allowIdleWakeup ||
+			(currentContext && !currentContext.isIdle())
+		)
+			return;
+		acknowledgePersisted();
 		for (const result of resultDelivery.drain()) {
 			if (!deliverResult(result)) resultDelivery.defer(result);
 		}
@@ -282,16 +317,16 @@ export default function (pi: ExtensionAPI) {
 			id: snap.id,
 			content: buildTerminalResultMessage(snap),
 			details: {
+				deliveryId: randomUUID(),
 				id: sanitizeTerminalLine(snap.id),
 				title: sanitizeTerminalLine(snap.title),
 				status: snap.status,
-				exitCode: snap.exitCode,
-				signal: snap.signal ? sanitizeTerminalLine(snap.signal) : undefined,
+				...(snap.exitCode === undefined ? {} : { exitCode: snap.exitCode }),
+				...(snap.signal ? { signal: sanitizeTerminalLine(snap.signal) } : {}),
 			},
 		});
-		// Pi queues followUp messages behind a busy turn. Queue immediately when
-		// no bg_kill call has reserved this settlement; held kill results remain
-		// pending until the tool either consumes or releases them.
+		// Active runs consume structural drafts at a boundary. Idle exits still
+		// wake Pi; held kill results remain owned by the observing tool.
 		if (!killPending) flushResults();
 	};
 
@@ -321,6 +356,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		shuttingDown = false;
+		currentContext = ctx;
+		allowIdleWakeup = true;
 		sessionGeneration++;
 		const statusOptions: UIStatusOptionsEvent = {
 			key: STATUS_KEY,
@@ -350,9 +387,61 @@ export default function (pi: ExtensionAPI) {
 		);
 	});
 
-	// Retry any deferred sends when the agent settles. Map-keyed delivery and
-	// drain-before-send make double delivery structurally impossible.
-	pi.on("agent_settled", flushResults);
+	const proposeResults = (
+		event: TurnEndEvent | AgentBeforeSettleEvent,
+		ctx: ExtensionContext,
+	) => {
+		if (shuttingDown) return;
+		currentContext = ctx;
+		acknowledgePersisted(ctx);
+		// canContinue describes the pre-draft projection. A normal final answer
+		// cannot continue until our custom message is appended; Pi validates the
+		// resulting projection after all handlers have proposed their entries.
+		if (event.outcome !== "completed") {
+			allowIdleWakeup = false;
+			return;
+		}
+		const proposed = new Set(
+			event.entries.flatMap((entry) => {
+				if (
+					entry.type !== "custom_message" ||
+					entry.customType !== "background-terminal-result"
+				)
+					return [];
+				const id = (entry.details as { deliveryId?: unknown } | undefined)
+					?.deliveryId;
+				return typeof id === "string" ? [id] : [];
+			}),
+		);
+		const results = resultDelivery
+			.peek()
+			.filter((result) => !proposed.has(result.details.deliveryId));
+		if (!results.length) return;
+		return {
+			entries: [
+				...event.entries,
+				...results.map((result) => ({
+					type: "custom_message" as const,
+					customType: "background-terminal-result",
+					content: result.content,
+					display: false,
+					details: result.details,
+				})),
+			],
+			continue: true,
+		};
+	};
+	pi.on("turn_end", proposeResults);
+	pi.on("agent_before_settle", proposeResults);
+	pi.on("agent_start", (_event, ctx) => {
+		currentContext = ctx;
+		allowIdleWakeup = true;
+	});
+	pi.on("turn_start", (_event, ctx) => acknowledgePersisted(ctx));
+	pi.on("agent_settled", (_event, ctx) => {
+		currentContext = ctx;
+		flushResults();
+	});
 
 	// /new, /resume, /fork, /reload, and quit all emit session_shutdown for
 	// the old extension instance. Processes never survive a session
@@ -361,6 +450,7 @@ export default function (pi: ExtensionAPI) {
 	// bounded so a wedged process cannot hang shutdown.
 	pi.on("session_shutdown", async () => {
 		shuttingDown = true;
+		currentContext = undefined;
 		sessionGeneration++;
 		sessionAbort?.abort();
 		sessionAbort = undefined;

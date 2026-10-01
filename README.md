@@ -1,6 +1,6 @@
 # pi-background-terminals
 
-Session-scoped background terminals for [Pi](https://github.com/earendil-works/pi). Tested with Pi 0.84.1; that is the supported/tested floor.
+Session-scoped background terminals for [Pi](https://github.com/earendil-works/pi). Requires Pi 0.87.1 or newer; development dependencies pin that tested floor.
 
 ## Features
 
@@ -8,7 +8,7 @@ Session-scoped background terminals for [Pi](https://github.com/earendil-works/p
 - No stdin surface: background commands receive EOF and cannot prompt interactively.
 - Separate bounded stdout and stderr tails, plus best-effort private session-lifetime spill logs.
 - Whole-tree termination: POSIX process groups or Windows `taskkill /T`, escalating to force termination.
-- Exactly-once, model-visible completion follow-ups that stay hidden from the transcript, plus a selectable running-count footer status.
+- Exactly-once, model-visible completions at Pi's actionable turn/settlement boundaries (or an idle follow-up), hidden from the transcript, plus a selectable running-count footer status.
 - A read-only two-pane `/ps` inspector—the sole detailed user-facing output surface—compatible with regular and fullscreen TUI modes.
 - Strict-preferred JSON Schema tool sampling where the active provider supports it.
 - Cleanup of all processes and temporary logs on session shutdown or reload.
@@ -39,6 +39,14 @@ Start npm run dev in the background and continue with the implementation.
 ```
 
 Use `/ps` to inspect live stdout/stderr or kill a terminal interactively. Completed terminals remain there for exactly five minutes after settlement, then disappear without disturbing selection of another terminal. The inspector uses `Up`/`Down` to select terminals, `g`/`G` to jump to the first/last terminal, `j`/`k` to scroll output, `t` to switch stdout/stderr, `x` to kill a running terminal, `r` to refresh, and `Esc`, `Ctrl+C`, or `q` to close. With `pi-ui-customization` loaded, editor footer navigation can use `Up`/`Down` to select the running-terminal footer row and `Enter` to open the same view; its accent color is preserved while selected. The model can use `bg_status`, `bg_list`, and `bg_kill` directly. Prefer Pi's regular shell tool for quick commands.
+
+## Completion delivery and caching
+
+During an active run, completed output is proposed as a hidden structural message at `turn_end` or `agent_before_settle`, requesting one next model response without changing steering/follow-up queues. A proposal is acknowledged only after it appears in the session branch, so validation failures or another extension replacing the proposal cannot silently lose output. Idle exits still wake Pi through a follow-up. Tool calls that return a terminal's final state consume that result instead of duplicating the notification.
+
+An aborted/error boundary never forces another response; undelivered results remain pending until the next user-initiated run or an explicit status/kill observation. Session shutdown still discards pending results and stops all terminals.
+
+For long idle waits, you can optionally set global `cacheWarming: "idle"` in Pi settings. Default `"streaming"` warming stops after Pi settles, even when a background command continues. Idle warming makes additional paid model requests only for eligible caches, follows Pi's cost checks, and has a bounded safety horizon (30 minutes in Pi 0.87.1). This extension never enables or forces it.
 
 ## Safety and limits
 

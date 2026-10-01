@@ -6,6 +6,10 @@ import type {
 	Theme,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import {
+	type BoundaryResult,
+	SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import backgroundTerminals from "../src/index.ts";
 
 function nodeCommand(script: string) {
@@ -73,6 +77,7 @@ function createBoundaryHarness() {
 	const messages: Array<{ message: unknown; options: unknown }> = [];
 	const bus = new Map<string, Set<(data: unknown) => void>>();
 	let idle = false;
+	const manager = SessionManager.inMemory();
 
 	const api = {
 		on: (name: string, handler: ExtensionHandler) => {
@@ -103,7 +108,7 @@ function createBoundaryHarness() {
 		mode: "json",
 		hasUI: false,
 		isIdle: () => idle,
-		sessionManager: { getSessionId: () => "test-session" },
+		sessionManager: manager,
 		ui: {
 			theme: { fg: (_color: string, text: string) => text },
 			setStatus: () => {},
@@ -112,10 +117,32 @@ function createBoundaryHarness() {
 	} as unknown as ExtensionContext;
 
 	backgroundTerminals(api);
-	const emit = async (name: string) => {
+	const emit = async (name: string, commit = true, outcome = "completed") => {
+		let proposal: BoundaryResult | undefined;
 		for (const handler of handlers.get(name) ?? []) {
-			await handler({ type: name }, ctx);
+			proposal = (await handler(
+				{
+					type: name,
+					entries: [],
+					outcome,
+					context: { canContinue: outcome === "completed" },
+				},
+				ctx,
+			)) as BoundaryResult | undefined;
+			if (commit)
+				for (const entry of proposal?.entries ?? []) {
+					if (entry.type === "custom_message") {
+						manager.appendCustomMessageEntry(
+							entry.customType,
+							entry.content,
+							entry.display,
+							entry.details,
+						);
+						messages.push({ message: entry, options: { boundary: name } });
+					}
+				}
 		}
+		return proposal;
 	};
 
 	return {
@@ -301,9 +328,20 @@ test("extension boundary delivers completion exactly once across idle/settled ra
 				);
 			}),
 		);
-		// A busy turn is not a reason to retain output: Pi accepts and queues the
-		// hidden follow-up immediately, even if agent_settled is much later.
-		assert.ok(await poll(() => harness.messages.length === 1));
+		// Busy completions remain pending until a structural boundary commits.
+		assert.equal(harness.messages.length, 0);
+		const rejected = await harness.emit("turn_end", false);
+		assert.equal(rejected?.continue, true);
+		assert.equal(
+			harness.messages.length,
+			0,
+			"a rejected draft must not be acknowledged",
+		);
+		await harness.emit("agent_before_settle");
+		assert.equal(harness.messages.length, 1);
+		await harness.emit("turn_start");
+		await harness.emit("turn_end");
+		assert.equal(harness.messages.length, 1);
 		assert.ok(
 			(harness.messages[0].message as { content: string }).content.length <
 				50_000,
@@ -347,7 +385,7 @@ test("extension boundary delivers completion exactly once across idle/settled ra
 		assert.deepEqual(
 			harness.messages.map(({ options }) => options),
 			[
-				{ deliverAs: "followUp", triggerTurn: true },
+				{ boundary: "agent_before_settle" },
 				{ deliverAs: "followUp", triggerTurn: true },
 			],
 		);

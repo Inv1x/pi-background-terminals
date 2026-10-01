@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0
+
+### Minor Changes
+
+- Require Pi 0.87.1 and deliver active-run completions through actionable turn/settlement boundaries. Acknowledge only committed messages, preserve exactly-once idle delivery and tool observation, and avoid continuing cancelled/error runs. Add real ExtensionRunner coverage for rejected drafts and document optional idle cache warming.
+
+### Patch Changes
+
+- c013d9d: Avoid output materialization in footer updates, queue bounded completion payloads without spill paths, and keep delayed completion delivery safe after terminal retention expires.
+- 7d90a14: Keep background tool and completion transcript rows metadata-only, make `/ps` the detailed output surface, retain settled terminals for five minutes, and harden manager lifecycle, snapshots, input validation, and terminal rendering.
+- 45e288b: Adopt Changesets for version and changelog management.
+
 All notable changes to this project are documented here.
 
 ## [Unreleased]
