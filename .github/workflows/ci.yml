@@ -19,7 +19,7 @@ jobs:
           node-version: 22.19.0
           cache: npm
       - run: npm ci
-      - run: npm run release:status
+      - run: npm run release:status -- --since origin/main
       - run: npm run verify
       - run: npm pack --dry-run
 
